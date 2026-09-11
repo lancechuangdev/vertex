@@ -8,25 +8,35 @@ import (
 )
 
 const (
-	defaultChainID = uint64(1)
-	defaultTimeout = 10 * time.Second
+	defaultChainID   = uint64(1)
+	defaultTimeout   = 10 * time.Second
+	defaultBatchSize = uint64(100)
+	maxBatchSize     = uint64(1000)
 )
 
 type Config struct {
 	RPCURL          string
+	DatabaseURL     string
 	ExpectedChainID uint64
 	RPCTimeout      time.Duration
+	StartBlock      uint64
+	BatchSize       uint64
 }
 
 func Load() (Config, error) {
 	cfg := Config{
 		RPCURL:          os.Getenv("RPC_URL"),
+		DatabaseURL:     os.Getenv("DATABASE_URL"),
 		ExpectedChainID: defaultChainID,
 		RPCTimeout:      defaultTimeout,
+		BatchSize:       defaultBatchSize,
 	}
 
 	if cfg.RPCURL == "" {
 		return Config{}, fmt.Errorf("RPC_URL is required")
+	}
+	if cfg.DatabaseURL == "" {
+		return Config{}, fmt.Errorf("DATABASE_URL is required")
 	}
 
 	if value := os.Getenv("EXPECTED_CHAIN_ID"); value != "" {
@@ -43,6 +53,22 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("RPC_TIMEOUT must be a positive duration")
 		}
 		cfg.RPCTimeout = timeout
+	}
+
+	if value := os.Getenv("START_BLOCK"); value != "" {
+		start, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("START_BLOCK must be a non-negative decimal integer")
+		}
+		cfg.StartBlock = start
+	}
+
+	if value := os.Getenv("BLOCK_BATCH_SIZE"); value != "" {
+		batchSize, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || batchSize == 0 || batchSize > maxBatchSize {
+			return Config{}, fmt.Errorf("BLOCK_BATCH_SIZE must be between 1 and %d", maxBatchSize)
+		}
+		cfg.BatchSize = batchSize
 	}
 
 	return cfg, nil

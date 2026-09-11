@@ -4,6 +4,7 @@ import "testing"
 
 func TestLoad(t *testing.T) {
 	t.Setenv("RPC_URL", "http://node.example")
+	t.Setenv("DATABASE_URL", "postgres://indexer@localhost/vertex")
 	t.Setenv("EXPECTED_CHAIN_ID", "8453")
 	t.Setenv("RPC_TIMEOUT", "3s")
 
@@ -21,6 +22,15 @@ func TestLoad(t *testing.T) {
 
 func TestLoadRequiresRPCURL(t *testing.T) {
 	t.Setenv("RPC_URL", "")
+	t.Setenv("DATABASE_URL", "postgres://indexer@localhost/vertex")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want an error")
+	}
+}
+
+func TestLoadRequiresDatabaseURL(t *testing.T) {
+	t.Setenv("RPC_URL", "http://node.example")
+	t.Setenv("DATABASE_URL", "")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want an error")
 	}

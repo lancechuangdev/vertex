@@ -16,7 +16,7 @@ direction, not code that already exists.
   - Call `eth_chainId` and reject an unexpected network.
   - Call `eth_blockNumber` to prove the node is usable.
   - Give every RPC request a timeout and return useful errors.
-- [ ] **Step 2 — Persist blocks and checkpoints**
+- [x] **Step 2 — Persist blocks and checkpoints**
   - Add PostgreSQL migrations for blocks and per-chain checkpoints.
   - Fetch a bounded block range and advance its checkpoint atomically.
   - Use uniqueness constraints so replaying a range is safe.
@@ -43,26 +43,32 @@ direction, not code that already exists.
   - Add Docker, local Compose, and Terraform for ECS Fargate, RDS, MSK,
     ECR, secrets, autoscaling, backups, and alarms.
 
-## Step 1: run it
+## Run it
 
-Requirements: Go 1.25+ and access to an EVM-compatible JSON-RPC endpoint.
+Requirements: Go 1.25+, PostgreSQL, and access to an EVM-compatible JSON-RPC endpoint.
 
 ```bash
 export RPC_URL="https://your-ethereum-rpc.example"
 export EXPECTED_CHAIN_ID="1"
+export DATABASE_URL="postgres://postgres:postgres@localhost:5432/vertex?sslmode=disable"
+export START_BLOCK="0"
+export BLOCK_BATCH_SIZE="100"
 go run ./cmd/indexer
 ```
 
-Successful startup prints the verified chain ID and the node's latest block,
-then exits. This is a startup probe, not yet a continuous indexer.
+Each invocation indexes at most one bounded range and exits. Re-run the command
+to process the next range; continuous polling is added in Step 6.
 
 Configuration:
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `RPC_URL` | yes | — | HTTP(S) EVM JSON-RPC endpoint |
+| `DATABASE_URL` | yes | — | PostgreSQL connection URL |
 | `EXPECTED_CHAIN_ID` | no | `1` | Decimal chain ID used to prevent indexing the wrong network |
 | `RPC_TIMEOUT` | no | `10s` | Timeout for each JSON-RPC request |
+| `START_BLOCK` | no | `0` | First block used when a chain has no checkpoint |
+| `BLOCK_BATCH_SIZE` | no | `100` | Blocks per run, from 1 through 1000 |
 
 Run the tests:
 
@@ -73,9 +79,11 @@ go test ./...
 ## Current layout
 
 ```text
-cmd/indexer/       service entry point and startup probe
+cmd/indexer/       service entry point and one-shot range runner
 internal/config/   environment configuration and validation
 internal/ethrpc/   small typed EVM JSON-RPC client
+internal/indexer/  bounded range orchestration
+internal/postgres/ migrations and atomic block/checkpoint persistence
 ```
 
 ## Design invariants

@@ -3,6 +3,7 @@ package ethrpc
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +24,22 @@ type request struct {
 	Params  []any  `json:"params"`
 }
 
+// Block is the canonical block header data persisted by the indexer. Transaction
+// bodies are intentionally deferred until the transaction-indexing step.
+type Block struct {
+	Number     uint64
+	Hash       string
+	ParentHash string
+	Timestamp  uint64
+}
+
+type rpcBlock struct {
+	Number     string `json:"number"`
+	Hash       string `json:"hash"`
+	ParentHash string `json:"parentHash"`
+	Timestamp  string `json:"timestamp"`
+}
+
 type response struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      int             `json:"id"`
@@ -40,30 +57,70 @@ func New(url string, httpClient *http.Client) *Client {
 }
 
 func (c *Client) ChainID(ctx context.Context) (uint64, error) {
-	return c.hexUint64(ctx, "eth_chainId")
+	return c.hexUint64(ctx, "eth_chainId", nil)
 }
 
 func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
-	return c.hexUint64(ctx, "eth_blockNumber")
+	return c.hexUint64(ctx, "eth_blockNumber", nil)
 }
 
-func (c *Client) hexUint64(ctx context.Context, method string) (uint64, error) {
+func (c *Client) BlockByNumber(ctx context.Context, number uint64) (Block, error) {
+	var value *rpcBlock
+	if err := c.call(ctx, "eth_getBlockByNumber", []any{fmt.Sprintf("0x%x", number), false}, &value); err != nil {
+		return Block{}, err
+	}
+	if value == nil {
+		return Block{}, fmt.Errorf("eth_getBlockByNumber returned no block for %d", number)
+	}
+	returnedNumber, err := parseHexUint64("block number", value.Number)
+	if err != nil {
+		return Block{}, err
+	}
+	if returnedNumber != number {
+		return Block{}, fmt.Errorf("requested block %d, node returned %d", number, returnedNumber)
+	}
+	timestamp, err := parseHexUint64("block timestamp", value.Timestamp)
+	if err != nil {
+		return Block{}, err
+	}
+	if !validHash(value.Hash) || !validHash(value.ParentHash) {
+		return Block{}, fmt.Errorf("block %d returned an invalid hash", number)
+	}
+	return Block{Number: number, Hash: strings.ToLower(value.Hash), ParentHash: strings.ToLower(value.ParentHash), Timestamp: timestamp}, nil
+}
+
+func (c *Client) hexUint64(ctx context.Context, method string, params []any) (uint64, error) {
 	var value string
-	if err := c.call(ctx, method, &value); err != nil {
+	if err := c.call(ctx, method, params, &value); err != nil {
 		return 0, err
 	}
+	return parseHexUint64(method+" result", value)
+}
+
+func parseHexUint64(name, value string) (uint64, error) {
 	if !strings.HasPrefix(value, "0x") || len(value) <= 2 {
-		return 0, fmt.Errorf("%s returned invalid hex quantity %q", method, value)
+		return 0, fmt.Errorf("%s is invalid hex quantity %q", name, value)
 	}
 	n, err := strconv.ParseUint(value[2:], 16, 64)
 	if err != nil {
-		return 0, fmt.Errorf("parse %s result %q: %w", method, value, err)
+		return 0, fmt.Errorf("parse %s %q: %w", name, value, err)
 	}
 	return n, nil
 }
 
-func (c *Client) call(ctx context.Context, method string, result any) error {
-	body, err := json.Marshal(request{JSONRPC: "2.0", ID: 1, Method: method, Params: []any{}})
+func validHash(value string) bool {
+	if len(value) != 66 || !strings.HasPrefix(value, "0x") {
+		return false
+	}
+	_, err := hex.DecodeString(value[2:])
+	return err == nil
+}
+
+func (c *Client) call(ctx context.Context, method string, params []any, result any) error {
+	if params == nil {
+		params = []any{}
+	}
+	body, err := json.Marshal(request{JSONRPC: "2.0", ID: 1, Method: method, Params: params})
 	if err != nil {
 		return fmt.Errorf("encode %s request: %w", method, err)
 	}
