@@ -24,7 +24,7 @@ direction, not code that already exists.
   - Store transactions, receipts, and selected contract events.
   - Decode ERC-20 `Transfer` logs and normalize addresses and quantities.
   - Make writes idempotent with natural chain identifiers.
-- [ ] **Step 4 — Track confirmations and publish an outbox**
+- [x] **Step 4 — Track confirmations and publish an outbox**
   - Separate observed blocks from finalized business events.
   - Promote events only after a configurable confirmation depth.
   - Write downstream messages to a transactional outbox.
@@ -69,6 +69,7 @@ Configuration:
 | `RPC_TIMEOUT` | no | `10s` | Timeout for each JSON-RPC request |
 | `START_BLOCK` | no | `0` | First block used when a chain has no checkpoint |
 | `BLOCK_BATCH_SIZE` | no | `100` | Blocks per run, from 1 through 1000 |
+| `CONFIRMATION_DEPTH` | no | `12` | Number of blocks required before observed events are promoted |
 
 Run the tests:
 

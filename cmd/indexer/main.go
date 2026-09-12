@@ -49,7 +49,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 
-	service := indexer.Service{Source: client, Store: store, ChainID: chainID, Start: cfg.StartBlock, BatchSize: cfg.BatchSize}
+	service := indexer.Service{Source: client, Store: store, ChainID: chainID, Start: cfg.StartBlock, BatchSize: cfg.BatchSize, ConfirmationDepth: cfg.ConfirmationDepth}
 	indexed, err := service.RunOnce(ctx)
 	if err != nil {
 		return fmt.Errorf("index range: %w", err)

@@ -135,3 +135,64 @@ func (s *Store) CommitRange(ctx context.Context, chainID, expectedNext uint64, b
 	}
 	return tx.Commit(ctx)
 }
+
+// PromoteConfirmed marks observed blocks and transfers as confirmed and creates
+// their downstream messages in the same transaction. Repeating the operation
+// is safe: only previously unconfirmed rows are promoted, and each event has a
+// stable deduplication key.
+func (s *Store) PromoteConfirmed(ctx context.Context, chainID, confirmedThrough uint64) (uint64, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("begin confirmation transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var promoted uint64
+	err = tx.QueryRow(ctx, `
+		WITH newly_confirmed_blocks AS (
+			UPDATE blocks
+			SET confirmed_at = now()
+			WHERE chain_id = $1 AND number <= $2 AND confirmed_at IS NULL
+			RETURNING number
+		), newly_confirmed_transfers AS (
+			UPDATE token_transfers AS transfer
+			SET confirmed_at = now()
+			FROM transaction_receipts AS receipt
+			JOIN newly_confirmed_blocks AS block
+			  ON block.number = receipt.block_number
+			WHERE transfer.chain_id = $1
+			  AND receipt.chain_id = transfer.chain_id
+			  AND receipt.tx_hash = transfer.tx_hash
+			  AND transfer.confirmed_at IS NULL
+			RETURNING transfer.tx_hash, transfer.log_index, transfer.token_address,
+			          transfer.from_address, transfer.to_address, transfer.value,
+			          receipt.block_number
+		), inserted_messages AS (
+			INSERT INTO outbox_messages
+				(chain_id, event_type, deduplication_key, payload)
+			SELECT $1, 'token_transfer.confirmed',
+			       tx_hash || ':' || log_index::text,
+			       jsonb_build_object(
+			           'chain_id', $1,
+			           'block_number', block_number,
+			           'transaction_hash', tx_hash,
+			           'log_index', log_index,
+			           'token_address', token_address,
+			           'from_address', from_address,
+			           'to_address', to_address,
+			           'value', value::text
+			       )
+			FROM newly_confirmed_transfers
+			ON CONFLICT (chain_id, event_type, deduplication_key) DO NOTHING
+			RETURNING id
+		)
+		SELECT count(*) FROM newly_confirmed_blocks
+	`, chainID, confirmedThrough).Scan(&promoted)
+	if err != nil {
+		return 0, fmt.Errorf("promote confirmed data: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit confirmed data: %w", err)
+	}
+	return promoted, nil
+}

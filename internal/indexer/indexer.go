@@ -19,6 +19,7 @@ type BlockSource interface {
 type Store interface {
 	NextBlock(context.Context, uint64, uint64) (uint64, error)
 	CommitRange(context.Context, uint64, uint64, []IndexedBlock) error
+	PromoteConfirmed(context.Context, uint64, uint64) (uint64, error)
 }
 
 type IndexedBlock struct {
@@ -39,11 +40,12 @@ type TokenTransfer struct {
 const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 type Service struct {
-	Source    BlockSource
-	Store     Store
-	ChainID   uint64
-	Start     uint64
-	BatchSize uint64
+	Source            BlockSource
+	Store             Store
+	ChainID           uint64
+	Start             uint64
+	BatchSize         uint64
+	ConfirmationDepth uint64
 }
 
 // RunOnce fetches and commits at most one bounded range. It returns the number
@@ -61,7 +63,7 @@ func (s Service) RunOnce(ctx context.Context) (uint64, error) {
 		return 0, fmt.Errorf("read latest block: %w", err)
 	}
 	if next > latest {
-		return 0, nil
+		return 0, s.promoteConfirmed(ctx, latest)
 	}
 	end := next + s.BatchSize - 1
 	if end < next || end > latest {
@@ -101,7 +103,21 @@ func (s Service) RunOnce(ctx context.Context) (uint64, error) {
 	if err := s.Store.CommitRange(ctx, s.ChainID, next, blocks); err != nil {
 		return 0, fmt.Errorf("commit blocks %d-%d: %w", next, end, err)
 	}
+	if err := s.promoteConfirmed(ctx, latest); err != nil {
+		return 0, err
+	}
 	return uint64(len(blocks)), nil
+}
+
+func (s Service) promoteConfirmed(ctx context.Context, latest uint64) error {
+	if latest < s.ConfirmationDepth {
+		return nil
+	}
+	confirmedThrough := latest - s.ConfirmationDepth
+	if _, err := s.Store.PromoteConfirmed(ctx, s.ChainID, confirmedThrough); err != nil {
+		return fmt.Errorf("promote blocks through %d: %w", confirmedThrough, err)
+	}
+	return nil
 }
 
 // DecodeTokenTransfer recognizes the canonical ERC-20 Transfer event. Events

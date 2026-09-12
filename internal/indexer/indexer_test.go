@@ -28,8 +28,14 @@ func (f *fakeSource) BlockByNumber(_ context.Context, number uint64) (ethrpc.Blo
 }
 
 type fakeStore struct {
-	next      uint64
-	committed []IndexedBlock
+	next             uint64
+	committed        []IndexedBlock
+	confirmedThrough []uint64
+}
+
+func (f *fakeStore) PromoteConfirmed(_ context.Context, _ uint64, through uint64) (uint64, error) {
+	f.confirmedThrough = append(f.confirmedThrough, through)
+	return 0, nil
 }
 
 func (f *fakeStore) NextBlock(context.Context, uint64, uint64) (uint64, error) { return f.next, nil }
@@ -132,5 +138,32 @@ func TestRunOnceFetchesReceiptsAndDecodesTransfers(t *testing.T) {
 	}
 	if store.committed[0].Transfers[0].Value != "42" {
 		t.Fatalf("transfer = %+v", store.committed[0].Transfers[0])
+	}
+}
+
+func TestRunOncePromotesOnlyDeepEnoughBlocks(t *testing.T) {
+	source := &fakeSource{latest: 20}
+	store := &fakeStore{next: 21}
+	service := Service{Source: source, Store: store, ChainID: 1, BatchSize: 10, ConfirmationDepth: 6}
+
+	count, err := service.RunOnce(context.Background())
+	if err != nil || count != 0 {
+		t.Fatalf("RunOnce() = %d, %v", count, err)
+	}
+	if len(store.confirmedThrough) != 1 || store.confirmedThrough[0] != 14 {
+		t.Fatalf("confirmed through = %v, want [14]", store.confirmedThrough)
+	}
+}
+
+func TestRunOnceDoesNotPromoteBeforeDepth(t *testing.T) {
+	source := &fakeSource{latest: 5}
+	store := &fakeStore{next: 6}
+	service := Service{Source: source, Store: store, ChainID: 1, BatchSize: 10, ConfirmationDepth: 6}
+
+	if _, err := service.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if len(store.confirmedThrough) != 0 {
+		t.Fatalf("confirmed through = %v, want none", store.confirmedThrough)
 	}
 }

@@ -8,28 +8,31 @@ import (
 )
 
 const (
-	defaultChainID   = uint64(1)
-	defaultTimeout   = 10 * time.Second
-	defaultBatchSize = uint64(100)
-	maxBatchSize     = uint64(1000)
+	defaultChainID           = uint64(1)
+	defaultTimeout           = 10 * time.Second
+	defaultBatchSize         = uint64(100)
+	defaultConfirmationDepth = uint64(12)
+	maxBatchSize             = uint64(1000)
 )
 
 type Config struct {
-	RPCURL          string
-	DatabaseURL     string
-	ExpectedChainID uint64
-	RPCTimeout      time.Duration
-	StartBlock      uint64
-	BatchSize       uint64
+	RPCURL            string
+	DatabaseURL       string
+	ExpectedChainID   uint64
+	RPCTimeout        time.Duration
+	StartBlock        uint64
+	BatchSize         uint64
+	ConfirmationDepth uint64
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		RPCURL:          os.Getenv("RPC_URL"),
-		DatabaseURL:     os.Getenv("DATABASE_URL"),
-		ExpectedChainID: defaultChainID,
-		RPCTimeout:      defaultTimeout,
-		BatchSize:       defaultBatchSize,
+		RPCURL:            os.Getenv("RPC_URL"),
+		DatabaseURL:       os.Getenv("DATABASE_URL"),
+		ExpectedChainID:   defaultChainID,
+		RPCTimeout:        defaultTimeout,
+		BatchSize:         defaultBatchSize,
+		ConfirmationDepth: defaultConfirmationDepth,
 	}
 
 	if cfg.RPCURL == "" {
@@ -69,6 +72,14 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("BLOCK_BATCH_SIZE must be between 1 and %d", maxBatchSize)
 		}
 		cfg.BatchSize = batchSize
+	}
+
+	if value := os.Getenv("CONFIRMATION_DEPTH"); value != "" {
+		depth, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("CONFIRMATION_DEPTH must be a non-negative decimal integer")
+		}
+		cfg.ConfirmationDepth = depth
 	}
 
 	return cfg, nil
