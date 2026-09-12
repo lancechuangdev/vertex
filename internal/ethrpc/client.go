@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +18,8 @@ type Client struct {
 	httpClient *http.Client
 }
 
+const maxResponseBytes = 32 << 20
+
 type request struct {
 	JSONRPC string `json:"jsonrpc"`
 	ID      int    `json:"id"`
@@ -24,20 +27,68 @@ type request struct {
 	Params  []any  `json:"params"`
 }
 
-// Block is the canonical block header data persisted by the indexer. Transaction
-// bodies are intentionally deferred until the transaction-indexing step.
 type Block struct {
-	Number     uint64
-	Hash       string
-	ParentHash string
-	Timestamp  uint64
+	Number       uint64
+	Hash         string
+	ParentHash   string
+	Timestamp    uint64
+	Transactions []Transaction
+}
+
+type Transaction struct {
+	Hash  string
+	Index uint64
+	From  string
+	To    *string
+	Value string
+}
+
+type Receipt struct {
+	TransactionHash string
+	BlockNumber     uint64
+	Status          *uint64
+	GasUsed         uint64
+	ContractAddress *string
+	Logs            []Log
+}
+
+type Log struct {
+	Index   uint64
+	Address string
+	Topics  []string
+	Data    string
 }
 
 type rpcBlock struct {
-	Number     string `json:"number"`
-	Hash       string `json:"hash"`
-	ParentHash string `json:"parentHash"`
-	Timestamp  string `json:"timestamp"`
+	Number       string           `json:"number"`
+	Hash         string           `json:"hash"`
+	ParentHash   string           `json:"parentHash"`
+	Timestamp    string           `json:"timestamp"`
+	Transactions []rpcTransaction `json:"transactions"`
+}
+
+type rpcTransaction struct {
+	Hash             string  `json:"hash"`
+	TransactionIndex string  `json:"transactionIndex"`
+	From             string  `json:"from"`
+	To               *string `json:"to"`
+	Value            string  `json:"value"`
+}
+
+type rpcReceipt struct {
+	TransactionHash string   `json:"transactionHash"`
+	BlockNumber     string   `json:"blockNumber"`
+	Status          *string  `json:"status"`
+	GasUsed         string   `json:"gasUsed"`
+	ContractAddress *string  `json:"contractAddress"`
+	Logs            []rpcLog `json:"logs"`
+}
+
+type rpcLog struct {
+	LogIndex string   `json:"logIndex"`
+	Address  string   `json:"address"`
+	Topics   []string `json:"topics"`
+	Data     string   `json:"data"`
 }
 
 type response struct {
@@ -66,7 +117,7 @@ func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
 
 func (c *Client) BlockByNumber(ctx context.Context, number uint64) (Block, error) {
 	var value *rpcBlock
-	if err := c.call(ctx, "eth_getBlockByNumber", []any{fmt.Sprintf("0x%x", number), false}, &value); err != nil {
+	if err := c.call(ctx, "eth_getBlockByNumber", []any{fmt.Sprintf("0x%x", number), true}, &value); err != nil {
 		return Block{}, err
 	}
 	if value == nil {
@@ -86,7 +137,103 @@ func (c *Client) BlockByNumber(ctx context.Context, number uint64) (Block, error
 	if !validHash(value.Hash) || !validHash(value.ParentHash) {
 		return Block{}, fmt.Errorf("block %d returned an invalid hash", number)
 	}
-	return Block{Number: number, Hash: strings.ToLower(value.Hash), ParentHash: strings.ToLower(value.ParentHash), Timestamp: timestamp}, nil
+	block := Block{Number: number, Hash: strings.ToLower(value.Hash), ParentHash: strings.ToLower(value.ParentHash), Timestamp: timestamp}
+	block.Transactions = make([]Transaction, 0, len(value.Transactions))
+	for _, raw := range value.Transactions {
+		transaction, err := decodeTransaction(raw)
+		if err != nil {
+			return Block{}, fmt.Errorf("decode block %d transaction: %w", number, err)
+		}
+		block.Transactions = append(block.Transactions, transaction)
+	}
+	return block, nil
+}
+
+func (c *Client) TransactionReceipt(ctx context.Context, hash string) (Receipt, error) {
+	if !validHash(hash) {
+		return Receipt{}, fmt.Errorf("invalid transaction hash %q", hash)
+	}
+	var value *rpcReceipt
+	if err := c.call(ctx, "eth_getTransactionReceipt", []any{hash}, &value); err != nil {
+		return Receipt{}, err
+	}
+	if value == nil {
+		return Receipt{}, fmt.Errorf("eth_getTransactionReceipt returned no receipt for %s", hash)
+	}
+	return decodeReceipt(*value)
+}
+
+func decodeTransaction(raw rpcTransaction) (Transaction, error) {
+	if !validHash(raw.Hash) {
+		return Transaction{}, fmt.Errorf("invalid hash %q", raw.Hash)
+	}
+	index, err := parseHexUint64("transaction index", raw.TransactionIndex)
+	if err != nil {
+		return Transaction{}, err
+	}
+	from, err := normalizeAddress(raw.From)
+	if err != nil {
+		return Transaction{}, fmt.Errorf("from: %w", err)
+	}
+	to, err := normalizeOptionalAddress(raw.To)
+	if err != nil {
+		return Transaction{}, fmt.Errorf("to: %w", err)
+	}
+	value, err := parseHexQuantity("transaction value", raw.Value)
+	if err != nil {
+		return Transaction{}, err
+	}
+	return Transaction{Hash: strings.ToLower(raw.Hash), Index: index, From: from, To: to, Value: value}, nil
+}
+
+func decodeReceipt(raw rpcReceipt) (Receipt, error) {
+	if !validHash(raw.TransactionHash) {
+		return Receipt{}, fmt.Errorf("invalid receipt transaction hash %q", raw.TransactionHash)
+	}
+	blockNumber, err := parseHexUint64("receipt block number", raw.BlockNumber)
+	if err != nil {
+		return Receipt{}, err
+	}
+	gasUsed, err := parseHexUint64("receipt gas used", raw.GasUsed)
+	if err != nil {
+		return Receipt{}, err
+	}
+	contractAddress, err := normalizeOptionalAddress(raw.ContractAddress)
+	if err != nil {
+		return Receipt{}, fmt.Errorf("contract address: %w", err)
+	}
+	var status *uint64
+	if raw.Status != nil {
+		parsed, err := parseHexUint64("receipt status", *raw.Status)
+		if err != nil || parsed > 1 {
+			return Receipt{}, fmt.Errorf("invalid receipt status %q", *raw.Status)
+		}
+		status = &parsed
+	}
+	receipt := Receipt{TransactionHash: strings.ToLower(raw.TransactionHash), BlockNumber: blockNumber, Status: status, GasUsed: gasUsed, ContractAddress: contractAddress}
+	receipt.Logs = make([]Log, 0, len(raw.Logs))
+	for _, rawLog := range raw.Logs {
+		logIndex, err := parseHexUint64("log index", rawLog.LogIndex)
+		if err != nil {
+			return Receipt{}, err
+		}
+		address, err := normalizeAddress(rawLog.Address)
+		if err != nil {
+			return Receipt{}, fmt.Errorf("log address: %w", err)
+		}
+		topics := make([]string, len(rawLog.Topics))
+		for i, topic := range rawLog.Topics {
+			if !validHash(topic) {
+				return Receipt{}, fmt.Errorf("invalid log topic %q", topic)
+			}
+			topics[i] = strings.ToLower(topic)
+		}
+		if !validData(rawLog.Data) {
+			return Receipt{}, fmt.Errorf("invalid log data %q", rawLog.Data)
+		}
+		receipt.Logs = append(receipt.Logs, Log{Index: logIndex, Address: address, Topics: topics, Data: strings.ToLower(rawLog.Data)})
+	}
+	return receipt, nil
 }
 
 func (c *Client) hexUint64(ctx context.Context, method string, params []any) (uint64, error) {
@@ -106,6 +253,46 @@ func parseHexUint64(name, value string) (uint64, error) {
 		return 0, fmt.Errorf("parse %s %q: %w", name, value, err)
 	}
 	return n, nil
+}
+
+func parseHexQuantity(name, value string) (string, error) {
+	if !strings.HasPrefix(value, "0x") || len(value) <= 2 {
+		return "", fmt.Errorf("%s is invalid hex quantity %q", name, value)
+	}
+	n, ok := new(big.Int).SetString(value[2:], 16)
+	if !ok || n.Sign() < 0 || n.BitLen() > 256 {
+		return "", fmt.Errorf("%s is invalid uint256 quantity %q", name, value)
+	}
+	return n.String(), nil
+}
+
+func normalizeAddress(value string) (string, error) {
+	if len(value) != 42 || !strings.HasPrefix(value, "0x") {
+		return "", fmt.Errorf("invalid address %q", value)
+	}
+	if _, err := hex.DecodeString(value[2:]); err != nil {
+		return "", fmt.Errorf("invalid address %q", value)
+	}
+	return strings.ToLower(value), nil
+}
+
+func normalizeOptionalAddress(value *string) (*string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	normalized, err := normalizeAddress(*value)
+	if err != nil {
+		return nil, err
+	}
+	return &normalized, nil
+}
+
+func validData(value string) bool {
+	if !strings.HasPrefix(value, "0x") || len(value)%2 != 0 {
+		return false
+	}
+	_, err := hex.DecodeString(value[2:])
+	return err == nil
 }
 
 func validHash(value string) bool {
@@ -142,7 +329,7 @@ func (c *Client) call(ctx context.Context, method string, params []any, result a
 	}
 
 	var envelope response
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&envelope); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&envelope); err != nil {
 		return fmt.Errorf("decode %s response: %w", method, err)
 	}
 	if envelope.Error != nil {

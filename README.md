@@ -20,7 +20,7 @@ direction, not code that already exists.
   - Add PostgreSQL migrations for blocks and per-chain checkpoints.
   - Fetch a bounded block range and advance its checkpoint atomically.
   - Use uniqueness constraints so replaying a range is safe.
-- [ ] **Step 3 — Index transactions and EVM logs**
+- [x] **Step 3 — Index transactions and EVM logs**
   - Store transactions, receipts, and selected contract events.
   - Decode ERC-20 `Transfer` logs and normalize addresses and quantities.
   - Make writes idempotent with natural chain identifiers.

@@ -5,8 +5,9 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 
-	"github.com/example/vertex/internal/ethrpc"
+	"github.com/example/vertex/internal/indexer"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -19,12 +20,18 @@ type Store struct{ pool *pgxpool.Pool }
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 func (s *Store) Migrate(ctx context.Context) error {
-	sql, err := migrations.ReadFile("migrations/001_blocks.sql")
+	files, err := fs.Glob(migrations, "migrations/*.sql")
 	if err != nil {
-		return fmt.Errorf("read migration: %w", err)
+		return fmt.Errorf("list migrations: %w", err)
 	}
-	if _, err := s.pool.Exec(ctx, string(sql)); err != nil {
-		return fmt.Errorf("apply migration: %w", err)
+	for _, name := range files {
+		sql, err := migrations.ReadFile(name)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", name, err)
+		}
+		if _, err := s.pool.Exec(ctx, string(sql)); err != nil {
+			return fmt.Errorf("apply migration %s: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -40,7 +47,7 @@ func (s *Store) NextBlock(ctx context.Context, chainID, start uint64) (uint64, e
 	return next, err
 }
 
-func (s *Store) CommitRange(ctx context.Context, chainID, expectedNext uint64, blocks []ethrpc.Block) error {
+func (s *Store) CommitRange(ctx context.Context, chainID, expectedNext uint64, blocks []indexer.IndexedBlock) error {
 	if len(blocks) == 0 {
 		return nil
 	}
@@ -63,7 +70,8 @@ func (s *Store) CommitRange(ctx context.Context, chainID, expectedNext uint64, b
 		return fmt.Errorf("checkpoint moved: expected %d, found %d", expectedNext, actualNext)
 	}
 
-	for i, block := range blocks {
+	for i, indexed := range blocks {
+		block := indexed.Block
 		want := expectedNext + uint64(i)
 		if block.Number != want {
 			return fmt.Errorf("non-contiguous range: got block %d, want %d", block.Number, want)
@@ -80,6 +88,37 @@ func (s *Store) CommitRange(ctx context.Context, chainID, expectedNext uint64, b
 		}
 		if hash != block.Hash {
 			return fmt.Errorf("block %d conflicts with stored hash %s", block.Number, hash)
+		}
+		for _, transaction := range block.Transactions {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO transactions
+					(chain_id, tx_hash, block_number, tx_index, from_address, to_address, value)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
+				ON CONFLICT (chain_id, tx_hash) DO UPDATE SET tx_hash = transactions.tx_hash
+			`, chainID, transaction.Hash, block.Number, transaction.Index, transaction.From, transaction.To, transaction.Value); err != nil {
+				return fmt.Errorf("insert transaction %s: %w", transaction.Hash, err)
+			}
+		}
+		for _, receipt := range indexed.Receipts {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO transaction_receipts
+					(chain_id, tx_hash, block_number, status, gas_used, contract_address)
+				VALUES ($1, $2, $3, $4, $5, $6)
+				ON CONFLICT (chain_id, tx_hash) DO UPDATE SET tx_hash = transaction_receipts.tx_hash
+			`, chainID, receipt.TransactionHash, receipt.BlockNumber, receipt.Status, receipt.GasUsed, receipt.ContractAddress); err != nil {
+				return fmt.Errorf("insert receipt %s: %w", receipt.TransactionHash, err)
+			}
+		}
+		for _, transfer := range indexed.Transfers {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO token_transfers
+					(chain_id, tx_hash, log_index, token_address, from_address, to_address, value)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
+				ON CONFLICT (chain_id, tx_hash, log_index)
+				DO UPDATE SET tx_hash = token_transfers.tx_hash
+			`, chainID, transfer.TransactionHash, transfer.LogIndex, transfer.TokenAddress, transfer.FromAddress, transfer.ToAddress, transfer.Value); err != nil {
+				return fmt.Errorf("insert token transfer %s/%d: %w", transfer.TransactionHash, transfer.LogIndex, err)
+			}
 		}
 	}
 
