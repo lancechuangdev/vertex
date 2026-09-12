@@ -28,10 +28,11 @@ direction, not code that already exists.
   - Separate observed blocks from finalized business events.
   - Promote events only after a configurable confirmation depth.
   - Write downstream messages to a transactional outbox.
-- [ ] **Step 5 — Detect and recover from reorganizations**
+- [x] **Step 5 — Detect and recover from reorganizations**
   - Compare stored parent hashes with the node's canonical chain.
   - Find the common ancestor and invalidate orphaned chain data.
   - Replay forward without duplicating downstream effects.
+  - Emit compensating events for published transfers orphaned by a reorganization.
 - [ ] **Step 6 — Operate continuously and recover safely**
   - Add polling, bounded concurrency, retries with backoff, and graceful shutdown.
   - Add explicit replay commands and poison-event/dead-letter handling.

@@ -31,6 +31,21 @@ type fakeStore struct {
 	next             uint64
 	committed        []IndexedBlock
 	confirmedThrough []uint64
+	hashes           map[uint64]string
+	rewoundTo        []uint64
+}
+
+func (f *fakeStore) BlockHash(_ context.Context, _ uint64, number uint64) (string, bool, error) {
+	if f.hashes == nil {
+		return "", true, nil
+	}
+	hash, ok := f.hashes[number]
+	return hash, ok, nil
+}
+
+func (f *fakeStore) Rewind(_ context.Context, _ uint64, _ uint64, next uint64) error {
+	f.rewoundTo = append(f.rewoundTo, next)
+	return nil
 }
 
 func (f *fakeStore) PromoteConfirmed(_ context.Context, _ uint64, through uint64) (uint64, error) {
@@ -81,7 +96,7 @@ func TestRunOnceBoundsRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOnce() error = %v", err)
 	}
-	if count != 3 || len(store.committed) != 3 || source.fetched[0] != 10 || source.fetched[2] != 12 {
+	if count != 3 || len(store.committed) != 3 || source.fetched[len(source.fetched)-3] != 10 || source.fetched[len(source.fetched)-1] != 12 {
 		t.Fatalf("unexpected range: count=%d fetched=%v committed=%v", count, source.fetched, store.committed)
 	}
 }
@@ -165,5 +180,51 @@ func TestRunOnceDoesNotPromoteBeforeDepth(t *testing.T) {
 	}
 	if len(store.confirmedThrough) != 0 {
 		t.Fatalf("confirmed through = %v, want none", store.confirmedThrough)
+	}
+}
+
+func TestRunOnceRewindsToCommonAncestorAndReplays(t *testing.T) {
+	const (
+		commonHash = "0xcommon"
+		newHash11  = "0xnew11"
+		newHash12  = "0xnew12"
+	)
+	source := &fakeSource{
+		latest: 13,
+		blocks: map[uint64]ethrpc.Block{
+			10: {Number: 10, Hash: commonHash},
+			11: {Number: 11, Hash: newHash11, ParentHash: commonHash},
+			12: {Number: 12, Hash: newHash12, ParentHash: newHash11},
+			13: {Number: 13, Hash: "0xnew13", ParentHash: newHash12},
+		},
+	}
+	store := &fakeStore{
+		next:   13,
+		hashes: map[uint64]string{10: commonHash, 11: "0xold11", 12: "0xold12"},
+	}
+	service := Service{Source: source, Store: store, ChainID: 1, Start: 10, BatchSize: 3, ConfirmationDepth: 100}
+
+	count, err := service.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if count != 3 || len(store.rewoundTo) != 1 || store.rewoundTo[0] != 11 {
+		t.Fatalf("count=%d rewound=%v, want count=3 rewound=[11]", count, store.rewoundTo)
+	}
+	if len(store.committed) != 3 || store.committed[0].Block.Number != 11 || store.committed[2].Block.Number != 13 {
+		t.Fatalf("replayed blocks = %+v", store.committed)
+	}
+}
+
+func TestRunOnceRejectsRegressedNodeHead(t *testing.T) {
+	source := &fakeSource{latest: 10}
+	store := &fakeStore{next: 12, hashes: map[uint64]string{11: "0xstored"}}
+	service := Service{Source: source, Store: store, ChainID: 1, BatchSize: 1}
+
+	if _, err := service.RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce() error = nil, want node-behind error")
+	}
+	if len(store.rewoundTo) != 0 {
+		t.Fatalf("rewound = %v, want none", store.rewoundTo)
 	}
 }

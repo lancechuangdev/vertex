@@ -18,6 +18,8 @@ type BlockSource interface {
 
 type Store interface {
 	NextBlock(context.Context, uint64, uint64) (uint64, error)
+	BlockHash(context.Context, uint64, uint64) (string, bool, error)
+	Rewind(context.Context, uint64, uint64, uint64) error
 	CommitRange(context.Context, uint64, uint64, []IndexedBlock) error
 	PromoteConfirmed(context.Context, uint64, uint64) (uint64, error)
 }
@@ -62,6 +64,10 @@ func (s Service) RunOnce(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("read latest block: %w", err)
 	}
+	next, err = s.recoverReorganization(ctx, next, latest)
+	if err != nil {
+		return 0, err
+	}
 	if next > latest {
 		return 0, s.promoteConfirmed(ctx, latest)
 	}
@@ -70,10 +76,24 @@ func (s Service) RunOnce(ctx context.Context) (uint64, error) {
 		end = latest
 	}
 	blocks := make([]IndexedBlock, 0, end-next+1)
+	var previousHash string
+	if next > s.Start {
+		var found bool
+		previousHash, found, err = s.Store.BlockHash(ctx, s.ChainID, next-1)
+		if err != nil {
+			return 0, fmt.Errorf("read block %d hash: %w", next-1, err)
+		}
+		if !found {
+			return 0, fmt.Errorf("previous block %d is missing", next-1)
+		}
+	}
 	for number := next; ; number++ {
 		block, err := s.Source.BlockByNumber(ctx, number)
 		if err != nil {
 			return 0, fmt.Errorf("fetch block %d: %w", number, err)
+		}
+		if previousHash != "" && block.ParentHash != previousHash {
+			return 0, fmt.Errorf("block %d parent %s does not match previous hash %s", number, block.ParentHash, previousHash)
 		}
 		indexed := IndexedBlock{Block: block, Receipts: make([]ethrpc.Receipt, 0, len(block.Transactions))}
 		for _, transaction := range block.Transactions {
@@ -96,6 +116,7 @@ func (s Service) RunOnce(ctx context.Context) (uint64, error) {
 			}
 		}
 		blocks = append(blocks, indexed)
+		previousHash = block.Hash
 		if number == end {
 			break
 		}
@@ -107,6 +128,49 @@ func (s Service) RunOnce(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	return uint64(len(blocks)), nil
+}
+
+// recoverReorganization verifies the last indexed block against the node. On
+// a mismatch it walks backward to the common ancestor and atomically rewinds
+// storage so the normal range path can replay the canonical chain.
+func (s Service) recoverReorganization(ctx context.Context, next, latest uint64) (uint64, error) {
+	if next <= s.Start {
+		return next, nil
+	}
+	tip := next - 1
+	if tip > latest {
+		return 0, fmt.Errorf("node head %d is behind indexed tip %d", latest, tip)
+	}
+
+	for number := tip; ; number-- {
+		storedHash, found, err := s.Store.BlockHash(ctx, s.ChainID, number)
+		if err != nil {
+			return 0, fmt.Errorf("read stored block %d: %w", number, err)
+		}
+		if !found {
+			return 0, fmt.Errorf("checkpoint references missing block %d", number)
+		}
+		canonical, err := s.Source.BlockByNumber(ctx, number)
+		if err != nil {
+			return 0, fmt.Errorf("verify canonical block %d: %w", number, err)
+		}
+		if canonical.Hash == storedHash {
+			if number == tip {
+				return next, nil
+			}
+			replayFrom := number + 1
+			if err := s.Store.Rewind(ctx, s.ChainID, next, replayFrom); err != nil {
+				return 0, fmt.Errorf("rewind to block %d: %w", replayFrom, err)
+			}
+			return replayFrom, nil
+		}
+		if number == s.Start {
+			if err := s.Store.Rewind(ctx, s.ChainID, next, s.Start); err != nil {
+				return 0, fmt.Errorf("rewind to start block %d: %w", s.Start, err)
+			}
+			return s.Start, nil
+		}
+	}
 }
 
 func (s Service) promoteConfirmed(ctx context.Context, latest uint64) error {
