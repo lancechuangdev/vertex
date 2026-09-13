@@ -1,0 +1,46 @@
+groups:
+  - name: vertex-indexer
+    rules:
+      - alert: VertexIndexerLagging
+        expr: vertex_index_lag_blocks > 12
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Vertex indexer is behind the chain head
+          description: "The indexer has been more than 12 blocks behind for 10 minutes."
+
+      - alert: VertexRPCFailures
+        expr: sum(rate(vertex_rpc_requests_total{result="error"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Vertex indexer is experiencing RPC failures
+          description: "RPC failures have exceeded 0.1 requests per second for 5 minutes."
+
+      - alert: VertexDeepReorganization
+        expr: increase(vertex_reorg_depth_blocks_count[5m]) - ignoring(le) increase(vertex_reorg_depth_blocks_bucket{le="6"}[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Vertex indexer detected a deep chain reorganization
+          description: "A reorganization deeper than 6 blocks occurred in the last 5 minutes."
+
+      - alert: VertexOutboxBacklog
+        expr: vertex_outbox_backlog > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Vertex outbox delivery is backlogged
+          description: "More than 100 messages have remained unpublished for 10 minutes."
+
+      - alert: VertexDeadLetters
+        expr: vertex_dead_letter_backlog > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Vertex has unresolved poison events
+          description: "One or more dead-letter events have remained unresolved for 15 minutes."

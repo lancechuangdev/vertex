@@ -37,7 +37,7 @@ direction, not code that already exists.
   - Add polling, bounded concurrency, retries with backoff, and graceful shutdown.
   - Add explicit replay commands and poison-event/dead-letter handling.
   - Protect concurrent workers with leases or advisory locks.
-- [ ] **Step 7 — Add production observability**
+- [x] **Step 7 — Add production observability**
   - Expose health, readiness, Prometheus metrics, structured logs, and traces.
   - Alert on index lag, RPC failures, reorg depth, and outbox backlog.
 - [ ] **Step 8 — Containerize and deploy on AWS**
@@ -82,6 +82,18 @@ Configuration:
 | `RPC_CONCURRENCY` | no | `8` | Maximum concurrent receipt requests, from 1 through 128 |
 | `MAX_RETRIES` | no | `4` | Retries per failed indexing range, from 0 through 20 |
 | `RETRY_INITIAL_DELAY` | no | `500ms` | Initial exponential retry delay |
+| `OBSERVABILITY_ADDR` | no | `:9090` | Listen address for health, readiness, and Prometheus metrics |
+
+Operational HTTP endpoints:
+
+- `/healthz` reports process liveness.
+- `/readyz` verifies database connectivity after startup and lock acquisition.
+- `/metrics` exposes Prometheus metrics for indexing, RPC calls, reorgs, dead letters, and outbox backlog.
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` to
+export OpenTelemetry traces over OTLP/HTTP. Without an endpoint, tracing uses a
+no-op provider. Prometheus alert rules are provided in
+`observability/alerts.yml`.
 
 Run the tests:
 
@@ -97,6 +109,8 @@ internal/config/   environment configuration and validation
 internal/ethrpc/   small typed EVM JSON-RPC client
 internal/indexer/  bounded range orchestration and continuous runner
 internal/postgres/ migrations, dead letters, locking, and atomic persistence
+internal/observability/ health endpoints, Prometheus metrics, and OTLP traces
+observability/       Prometheus alert rules
 ```
 
 ## Design invariants

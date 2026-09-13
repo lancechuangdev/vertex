@@ -15,6 +15,7 @@ func TestLoad(t *testing.T) {
 	t.Setenv("RPC_CONCURRENCY", "16")
 	t.Setenv("MAX_RETRIES", "6")
 	t.Setenv("RETRY_INITIAL_DELAY", "250ms")
+	t.Setenv("OBSERVABILITY_ADDR", "127.0.0.1:9191")
 
 	cfg, err := Load()
 	if err != nil {
@@ -31,6 +32,9 @@ func TestLoad(t *testing.T) {
 	}
 	if cfg.PollInterval != 5*time.Second || cfg.RPCConcurrency != 16 || cfg.MaxRetries != 6 || cfg.RetryInitial != 250*time.Millisecond {
 		t.Fatalf("operational configuration = %+v", cfg)
+	}
+	if cfg.ObservabilityAddr != "127.0.0.1:9191" {
+		t.Fatalf("ObservabilityAddr = %q", cfg.ObservabilityAddr)
 	}
 }
 

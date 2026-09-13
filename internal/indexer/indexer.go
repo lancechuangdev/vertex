@@ -7,8 +7,12 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/example/vertex/internal/ethrpc"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type BlockSource interface {
@@ -23,6 +27,13 @@ type Store interface {
 	Rewind(ctx context.Context, chainID, expectedCheckpoint, replayFrom uint64, compensate bool) error
 	CommitRange(context.Context, uint64, uint64, []IndexedBlock) error
 	PromoteConfirmed(context.Context, uint64, uint64) (uint64, error)
+}
+
+type Observer interface {
+	ObserveChain(latest, next uint64)
+	ObserveBlocks(uint64)
+	ObserveReorganization(uint64)
+	ObserveDeadLetters(uint64)
 }
 
 type IndexedBlock struct {
@@ -60,11 +71,31 @@ type Service struct {
 	BatchSize         uint64
 	ConfirmationDepth uint64
 	Concurrency       int
+	Observer          Observer
+	Tracer            trace.Tracer
 }
 
 // RunOnce fetches and commits at most one bounded range. It returns the number
 // of blocks committed.
 func (s Service) RunOnce(ctx context.Context) (uint64, error) {
+	started := time.Now()
+	var span trace.Span
+	if s.Tracer != nil {
+		ctx, span = s.Tracer.Start(ctx, "indexer.run_once", trace.WithAttributes(attribute.Int64("chain.id", int64(s.ChainID))))
+		defer span.End()
+	}
+	indexed, err := s.runOnce(ctx)
+	if span != nil {
+		span.SetAttributes(attribute.Int64("indexer.blocks", int64(indexed)), attribute.Int64("indexer.duration_ms", time.Since(started).Milliseconds()))
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+	}
+	return indexed, err
+}
+
+func (s Service) runOnce(ctx context.Context) (uint64, error) {
 	if s.BatchSize == 0 {
 		return 0, fmt.Errorf("batch size must be positive")
 	}
@@ -75,6 +106,9 @@ func (s Service) RunOnce(ctx context.Context) (uint64, error) {
 	latest, err := s.Source.BlockNumber(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("read latest block: %w", err)
+	}
+	if s.Observer != nil {
+		s.Observer.ObserveChain(latest, next)
 	}
 	next, err = s.recoverReorganization(ctx, next, latest)
 	if err != nil {
@@ -119,6 +153,16 @@ func (s Service) RunOnce(ctx context.Context) (uint64, error) {
 	}
 	if err := s.Store.CommitRange(ctx, s.ChainID, next, blocks); err != nil {
 		return 0, fmt.Errorf("commit blocks %d-%d: %w", next, end, err)
+	}
+	if s.Observer != nil {
+		var deadLetters uint64
+		for _, block := range blocks {
+			deadLetters += uint64(len(block.DeadLetters))
+		}
+		s.Observer.ObserveBlocks(uint64(len(blocks)))
+		if deadLetters > 0 {
+			s.Observer.ObserveDeadLetters(deadLetters)
+		}
 	}
 	if err := s.promoteConfirmed(ctx, latest); err != nil {
 		return 0, err
@@ -248,12 +292,18 @@ func (s Service) recoverReorganization(ctx context.Context, next, latest uint64)
 				return next, nil
 			}
 			replayFrom := number + 1
+			if s.Observer != nil {
+				s.Observer.ObserveReorganization(tip - number)
+			}
 			if err := s.Store.Rewind(ctx, s.ChainID, next, replayFrom, true); err != nil {
 				return 0, fmt.Errorf("rewind to block %d: %w", replayFrom, err)
 			}
 			return replayFrom, nil
 		}
 		if number == s.Start {
+			if s.Observer != nil {
+				s.Observer.ObserveReorganization(tip - s.Start + 1)
+			}
 			if err := s.Store.Rewind(ctx, s.ChainID, next, s.Start, true); err != nil {
 				return 0, fmt.Errorf("rewind to start block %d: %w", s.Start, err)
 			}

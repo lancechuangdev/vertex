@@ -16,6 +16,7 @@ const (
 	defaultRPCConcurrency    = 8
 	defaultMaxRetries        = 4
 	defaultRetryInitial      = 500 * time.Millisecond
+	defaultObservabilityAddr = ":9090"
 	maxBatchSize             = uint64(1000)
 	maxRPCConcurrency        = 128
 	maxRetries               = 20
@@ -33,6 +34,7 @@ type Config struct {
 	RPCConcurrency    int
 	MaxRetries        int
 	RetryInitial      time.Duration
+	ObservabilityAddr string
 }
 
 func Load() (Config, error) {
@@ -47,6 +49,7 @@ func Load() (Config, error) {
 		RPCConcurrency:    defaultRPCConcurrency,
 		MaxRetries:        defaultMaxRetries,
 		RetryInitial:      defaultRetryInitial,
+		ObservabilityAddr: defaultObservabilityAddr,
 	}
 
 	if cfg.RPCURL == "" {
@@ -126,6 +129,10 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("RETRY_INITIAL_DELAY must be a positive duration")
 		}
 		cfg.RetryInitial = delay
+	}
+
+	if value := os.Getenv("OBSERVABILITY_ADDR"); value != "" {
+		cfg.ObservabilityAddr = value
 	}
 
 	return cfg, nil

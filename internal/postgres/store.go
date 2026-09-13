@@ -22,6 +22,23 @@ type Store struct{ pool *pgxpool.Pool }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
+func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
+
+func (s *Store) Backlogs(ctx context.Context, chainID uint64) (uint64, uint64, error) {
+	var outbox, deadLetters uint64
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM outbox_messages
+			 WHERE chain_id = $1 AND published_at IS NULL AND invalidated_at IS NULL),
+			(SELECT count(*) FROM dead_letters
+			 WHERE chain_id = $1 AND resolved_at IS NULL)
+	`, chainID).Scan(&outbox, &deadLetters)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read operational backlogs: %w", err)
+	}
+	return outbox, deadLetters, nil
+}
+
 // AcquireChainLock holds a PostgreSQL session advisory lock until release is
 // called, preventing multiple processes from advancing the same chain.
 func (s *Store) AcquireChainLock(ctx context.Context, chainID uint64) (func(context.Context) error, bool, error) {

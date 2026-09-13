@@ -12,6 +12,7 @@ type Runner struct {
 	RetryInitial time.Duration
 	MaxRetries   int
 	OnError      func(error)
+	OnResult     func(context.Context, uint64, error)
 }
 
 func (r Runner) Run(ctx context.Context) error {
@@ -20,6 +21,9 @@ func (r Runner) Run(ctx context.Context) error {
 	}
 	for {
 		indexed, err := r.runWithRetry(ctx)
+		if r.OnResult != nil {
+			r.OnResult(ctx, indexed, err)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
