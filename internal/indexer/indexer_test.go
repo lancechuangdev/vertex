@@ -33,6 +33,7 @@ type fakeStore struct {
 	confirmedThrough []uint64
 	hashes           map[uint64]string
 	rewoundTo        []uint64
+	rewindCompensate []bool
 }
 
 func (f *fakeStore) BlockHash(_ context.Context, _ uint64, number uint64) (string, bool, error) {
@@ -43,8 +44,9 @@ func (f *fakeStore) BlockHash(_ context.Context, _ uint64, number uint64) (strin
 	return hash, ok, nil
 }
 
-func (f *fakeStore) Rewind(_ context.Context, _ uint64, _ uint64, next uint64) error {
-	f.rewoundTo = append(f.rewoundTo, next)
+func (f *fakeStore) Rewind(_ context.Context, _ uint64, _ uint64, replayFrom uint64, compensate bool) error {
+	f.rewoundTo = append(f.rewoundTo, replayFrom)
+	f.rewindCompensate = append(f.rewindCompensate, compensate)
 	return nil
 }
 
@@ -226,5 +228,16 @@ func TestRunOnceRejectsRegressedNodeHead(t *testing.T) {
 	}
 	if len(store.rewoundTo) != 0 {
 		t.Fatalf("rewound = %v, want none", store.rewoundTo)
+	}
+}
+
+func TestReplayFromRewindsWithoutReorgCompensation(t *testing.T) {
+	store := &fakeStore{next: 20}
+	service := Service{Store: store, ChainID: 1, Start: 10}
+	if err := service.ReplayFrom(context.Background(), 15); err != nil {
+		t.Fatalf("ReplayFrom() error = %v", err)
+	}
+	if len(store.rewoundTo) != 1 || store.rewoundTo[0] != 15 || store.rewindCompensate[0] {
+		t.Fatalf("rewind = %v compensate = %v", store.rewoundTo, store.rewindCompensate)
 	}
 }

@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoad(t *testing.T) {
 	t.Setenv("RPC_URL", "http://node.example")
@@ -8,6 +11,10 @@ func TestLoad(t *testing.T) {
 	t.Setenv("EXPECTED_CHAIN_ID", "8453")
 	t.Setenv("RPC_TIMEOUT", "3s")
 	t.Setenv("CONFIRMATION_DEPTH", "64")
+	t.Setenv("POLL_INTERVAL", "5s")
+	t.Setenv("RPC_CONCURRENCY", "16")
+	t.Setenv("MAX_RETRIES", "6")
+	t.Setenv("RETRY_INITIAL_DELAY", "250ms")
 
 	cfg, err := Load()
 	if err != nil {
@@ -21,6 +28,9 @@ func TestLoad(t *testing.T) {
 	}
 	if cfg.ConfirmationDepth != 64 {
 		t.Fatalf("ConfirmationDepth = %d, want 64", cfg.ConfirmationDepth)
+	}
+	if cfg.PollInterval != 5*time.Second || cfg.RPCConcurrency != 16 || cfg.MaxRetries != 6 || cfg.RetryInitial != 250*time.Millisecond {
+		t.Fatalf("operational configuration = %+v", cfg)
 	}
 }
 

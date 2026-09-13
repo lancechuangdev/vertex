@@ -33,7 +33,7 @@ direction, not code that already exists.
   - Find the common ancestor and invalidate orphaned chain data.
   - Replay forward without duplicating downstream effects.
   - Emit compensating events for published transfers orphaned by a reorganization.
-- [ ] **Step 6 — Operate continuously and recover safely**
+- [x] **Step 6 — Operate continuously and recover safely**
   - Add polling, bounded concurrency, retries with backoff, and graceful shutdown.
   - Add explicit replay commands and poison-event/dead-letter handling.
   - Protect concurrent workers with leases or advisory locks.
@@ -57,8 +57,15 @@ export BLOCK_BATCH_SIZE="100"
 go run ./cmd/indexer
 ```
 
-Each invocation indexes at most one bounded range and exits. Re-run the command
-to process the next range; continuous polling is added in Step 6.
+The default `run` command catches up and then polls continuously. It retries
+transient failures with exponential backoff and shuts down cleanly on SIGINT or
+SIGTERM. Operational commands are:
+
+```bash
+go run ./cmd/indexer run                 # continuous service (default)
+go run ./cmd/indexer once                # index at most one bounded range
+go run ./cmd/indexer replay-and-run 19000000 # rewind and replay continuously
+```
 
 Configuration:
 
@@ -71,6 +78,10 @@ Configuration:
 | `START_BLOCK` | no | `0` | First block used when a chain has no checkpoint |
 | `BLOCK_BATCH_SIZE` | no | `100` | Blocks per run, from 1 through 1000 |
 | `CONFIRMATION_DEPTH` | no | `12` | Number of blocks required before observed events are promoted |
+| `POLL_INTERVAL` | no | `2s` | Delay between checks while caught up or after exhausted retries |
+| `RPC_CONCURRENCY` | no | `8` | Maximum concurrent receipt requests, from 1 through 128 |
+| `MAX_RETRIES` | no | `4` | Retries per failed indexing range, from 0 through 20 |
+| `RETRY_INITIAL_DELAY` | no | `500ms` | Initial exponential retry delay |
 
 Run the tests:
 
@@ -81,11 +92,11 @@ go test ./...
 ## Current layout
 
 ```text
-cmd/indexer/       service entry point and one-shot range runner
+cmd/indexer/       service entry point, commands, and graceful shutdown
 internal/config/   environment configuration and validation
 internal/ethrpc/   small typed EVM JSON-RPC client
-internal/indexer/  bounded range orchestration
-internal/postgres/ migrations and atomic block/checkpoint persistence
+internal/indexer/  bounded range orchestration and continuous runner
+internal/postgres/ migrations, dead letters, locking, and atomic persistence
 ```
 
 ## Design invariants

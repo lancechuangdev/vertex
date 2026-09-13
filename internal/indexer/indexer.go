@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 
 	"github.com/example/vertex/internal/ethrpc"
 )
@@ -19,15 +20,25 @@ type BlockSource interface {
 type Store interface {
 	NextBlock(context.Context, uint64, uint64) (uint64, error)
 	BlockHash(context.Context, uint64, uint64) (string, bool, error)
-	Rewind(context.Context, uint64, uint64, uint64) error
+	Rewind(ctx context.Context, chainID, expectedCheckpoint, replayFrom uint64, compensate bool) error
 	CommitRange(context.Context, uint64, uint64, []IndexedBlock) error
 	PromoteConfirmed(context.Context, uint64, uint64) (uint64, error)
 }
 
 type IndexedBlock struct {
-	Block     ethrpc.Block
-	Receipts  []ethrpc.Receipt
-	Transfers []TokenTransfer
+	Block       ethrpc.Block
+	Receipts    []ethrpc.Receipt
+	Transfers   []TokenTransfer
+	DeadLetters []DeadLetter
+}
+
+type DeadLetter struct {
+	TransactionHash string
+	LogIndex        uint64
+	Address         string
+	Topics          []string
+	Data            string
+	Error           string
 }
 
 type TokenTransfer struct {
@@ -48,6 +59,7 @@ type Service struct {
 	Start             uint64
 	BatchSize         uint64
 	ConfirmationDepth uint64
+	Concurrency       int
 }
 
 // RunOnce fetches and commits at most one bounded range. It returns the number
@@ -95,25 +107,9 @@ func (s Service) RunOnce(ctx context.Context) (uint64, error) {
 		if previousHash != "" && block.ParentHash != previousHash {
 			return 0, fmt.Errorf("block %d parent %s does not match previous hash %s", number, block.ParentHash, previousHash)
 		}
-		indexed := IndexedBlock{Block: block, Receipts: make([]ethrpc.Receipt, 0, len(block.Transactions))}
-		for _, transaction := range block.Transactions {
-			receipt, err := s.Source.TransactionReceipt(ctx, transaction.Hash)
-			if err != nil {
-				return 0, fmt.Errorf("fetch receipt %s: %w", transaction.Hash, err)
-			}
-			if receipt.TransactionHash != transaction.Hash || receipt.BlockNumber != block.Number {
-				return 0, fmt.Errorf("receipt %s does not belong to block %d", receipt.TransactionHash, block.Number)
-			}
-			indexed.Receipts = append(indexed.Receipts, receipt)
-			for _, log := range receipt.Logs {
-				transfer, ok, err := DecodeTokenTransfer(transaction.Hash, log)
-				if err != nil {
-					return 0, fmt.Errorf("decode transaction %s log %d: %w", transaction.Hash, log.Index, err)
-				}
-				if ok {
-					indexed.Transfers = append(indexed.Transfers, transfer)
-				}
-			}
+		indexed, err := s.indexBlock(ctx, block)
+		if err != nil {
+			return 0, err
 		}
 		blocks = append(blocks, indexed)
 		previousHash = block.Hash
@@ -128,6 +124,99 @@ func (s Service) RunOnce(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	return uint64(len(blocks)), nil
+}
+
+func (s Service) indexBlock(ctx context.Context, block ethrpc.Block) (IndexedBlock, error) {
+	type result struct {
+		receipt     ethrpc.Receipt
+		transfers   []TokenTransfer
+		deadLetters []DeadLetter
+		err         error
+	}
+	results := make([]result, len(block.Transactions))
+	workers := s.Concurrency
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(block.Transactions) {
+		workers = len(block.Transactions)
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				transaction := block.Transactions[i]
+				receipt, err := s.Source.TransactionReceipt(ctx, transaction.Hash)
+				if err != nil {
+					results[i].err = fmt.Errorf("fetch receipt %s: %w", transaction.Hash, err)
+					continue
+				}
+				if receipt.TransactionHash != transaction.Hash || receipt.BlockNumber != block.Number {
+					results[i].err = fmt.Errorf("receipt %s does not belong to block %d", receipt.TransactionHash, block.Number)
+					continue
+				}
+				results[i].receipt = receipt
+				for _, log := range receipt.Logs {
+					transfer, ok, err := DecodeTokenTransfer(transaction.Hash, log)
+					if err != nil {
+						results[i].deadLetters = append(results[i].deadLetters, DeadLetter{
+							TransactionHash: transaction.Hash, LogIndex: log.Index, Address: log.Address,
+							Topics: log.Topics, Data: log.Data, Error: err.Error(),
+						})
+						continue
+					}
+					if ok {
+						results[i].transfers = append(results[i].transfers, transfer)
+					}
+				}
+			}
+		}()
+	}
+	for i := range block.Transactions {
+		select {
+		case jobs <- i:
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return IndexedBlock{}, ctx.Err()
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	indexed := IndexedBlock{Block: block, Receipts: make([]ethrpc.Receipt, 0, len(results))}
+	for _, result := range results {
+		if result.err != nil {
+			return IndexedBlock{}, result.err
+		}
+		indexed.Receipts = append(indexed.Receipts, result.receipt)
+		indexed.Transfers = append(indexed.Transfers, result.transfers...)
+		indexed.DeadLetters = append(indexed.DeadLetters, result.deadLetters...)
+	}
+	return indexed, nil
+}
+
+func (s Service) ReplayFrom(ctx context.Context, from uint64) error {
+	next, err := s.Store.NextBlock(ctx, s.ChainID, s.Start)
+	if err != nil {
+		return fmt.Errorf("read checkpoint for replay: %w", err)
+	}
+	if from < s.Start {
+		return fmt.Errorf("replay block %d is before start block %d", from, s.Start)
+	}
+	if from > next {
+		return fmt.Errorf("replay block %d is ahead of checkpoint %d", from, next)
+	}
+	if from == next {
+		return nil
+	}
+	if err := s.Store.Rewind(ctx, s.ChainID, next, from, false); err != nil {
+		return fmt.Errorf("rewind for replay to block %d: %w", from, err)
+	}
+	return nil
 }
 
 // recoverReorganization verifies the last indexed block against the node. On
@@ -159,13 +248,13 @@ func (s Service) recoverReorganization(ctx context.Context, next, latest uint64)
 				return next, nil
 			}
 			replayFrom := number + 1
-			if err := s.Store.Rewind(ctx, s.ChainID, next, replayFrom); err != nil {
+			if err := s.Store.Rewind(ctx, s.ChainID, next, replayFrom, true); err != nil {
 				return 0, fmt.Errorf("rewind to block %d: %w", replayFrom, err)
 			}
 			return replayFrom, nil
 		}
 		if number == s.Start {
-			if err := s.Store.Rewind(ctx, s.ChainID, next, s.Start); err != nil {
+			if err := s.Store.Rewind(ctx, s.ChainID, next, s.Start, true); err != nil {
 				return 0, fmt.Errorf("rewind to start block %d: %w", s.Start, err)
 			}
 			return s.Start, nil

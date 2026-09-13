@@ -3,9 +3,12 @@ package postgres
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
+	"sync"
 
 	"github.com/example/vertex/internal/indexer"
 	"github.com/jackc/pgx/v5"
@@ -18,6 +21,42 @@ var migrations embed.FS
 type Store struct{ pool *pgxpool.Pool }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+
+// AcquireChainLock holds a PostgreSQL session advisory lock until release is
+// called, preventing multiple processes from advancing the same chain.
+func (s *Store) AcquireChainLock(ctx context.Context, chainID uint64) (func(context.Context) error, bool, error) {
+	if chainID > math.MaxInt64 {
+		return nil, false, fmt.Errorf("chain ID %d exceeds advisory lock range", chainID)
+	}
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("acquire lock connection: %w", err)
+	}
+	var acquired bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, int64(chainID)).Scan(&acquired); err != nil {
+		conn.Release()
+		return nil, false, fmt.Errorf("acquire chain advisory lock: %w", err)
+	}
+	if !acquired {
+		conn.Release()
+		return nil, false, nil
+	}
+	var once sync.Once
+	var releaseErr error
+	release := func(releaseCtx context.Context) error {
+		once.Do(func() {
+			defer conn.Release()
+			var unlocked bool
+			if err := conn.QueryRow(releaseCtx, `SELECT pg_advisory_unlock($1)`, int64(chainID)).Scan(&unlocked); err != nil {
+				releaseErr = fmt.Errorf("release chain advisory lock: %w", err)
+			} else if !unlocked {
+				releaseErr = fmt.Errorf("chain advisory lock was not held")
+			}
+		})
+		return releaseErr
+	}
+	return release, true, nil
+}
 
 func (s *Store) Migrate(ctx context.Context) error {
 	files, err := fs.Glob(migrations, "migrations/*.sql")
@@ -65,7 +104,7 @@ func (s *Store) BlockHash(ctx context.Context, chainID, number uint64) (string, 
 // transaction. Pending orphan outbox messages are removed; published records
 // are retained as invalidated deduplication tombstones and receive an
 // idempotent compensating event.
-func (s *Store) Rewind(ctx context.Context, chainID, expectedNext, next uint64) error {
+func (s *Store) Rewind(ctx context.Context, chainID, expectedCheckpoint, replayFrom uint64, compensate bool) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin rewind transaction: %w", err)
@@ -76,14 +115,15 @@ func (s *Store) Rewind(ctx context.Context, chainID, expectedNext, next uint64) 
 		UPDATE chain_checkpoints
 		SET next_block = $2, updated_at = now()
 		WHERE chain_id = $1 AND next_block = $3
-	`, chainID, next, expectedNext)
+	`, chainID, replayFrom, expectedCheckpoint)
 	if err != nil {
 		return fmt.Errorf("rewind checkpoint: %w", err)
 	}
 	if command.RowsAffected() != 1 {
 		return fmt.Errorf("checkpoint changed while rewinding")
 	}
-	if _, err := tx.Exec(ctx, `
+	if compensate {
+		if _, err := tx.Exec(ctx, `
 		INSERT INTO outbox_messages
 			(chain_id, event_type, deduplication_key, payload)
 		SELECT message.chain_id,
@@ -105,8 +145,9 @@ func (s *Store) Rewind(ctx context.Context, chainID, expectedNext, next uint64) 
 		  AND message.invalidated_at IS NULL
 		  AND block.number >= $2
 		ON CONFLICT (chain_id, event_type, deduplication_key) DO NOTHING
-	`, chainID, next); err != nil {
-		return fmt.Errorf("enqueue orphan reversal messages: %w", err)
+		`, chainID, replayFrom); err != nil {
+			return fmt.Errorf("enqueue orphan reversal messages: %w", err)
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM outbox_messages
@@ -114,23 +155,25 @@ func (s *Store) Rewind(ctx context.Context, chainID, expectedNext, next uint64) 
 		  AND event_type = 'token_transfer.confirmed'
 		  AND published_at IS NULL
 		  AND (payload->>'block_number')::numeric >= $2
-	`, chainID, next); err != nil {
+	`, chainID, replayFrom); err != nil {
 		return fmt.Errorf("delete pending orphan messages: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE outbox_messages
-		SET invalidated_at = now()
-		WHERE chain_id = $1
-		  AND event_type = 'token_transfer.confirmed'
-		  AND published_at IS NOT NULL AND invalidated_at IS NULL
-		  AND (payload->>'block_number')::numeric >= $2
-	`, chainID, next); err != nil {
-		return fmt.Errorf("invalidate published orphan messages: %w", err)
+	if compensate {
+		if _, err := tx.Exec(ctx, `
+			UPDATE outbox_messages
+			SET invalidated_at = now()
+			WHERE chain_id = $1
+			  AND event_type = 'token_transfer.confirmed'
+			  AND published_at IS NOT NULL AND invalidated_at IS NULL
+			  AND (payload->>'block_number')::numeric >= $2
+		`, chainID, replayFrom); err != nil {
+			return fmt.Errorf("invalidate published orphan messages: %w", err)
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM blocks
 		WHERE chain_id = $1 AND number >= $2
-	`, chainID, next); err != nil {
+	`, chainID, replayFrom); err != nil {
 		return fmt.Errorf("delete orphan blocks: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -210,6 +253,26 @@ func (s *Store) CommitRange(ctx context.Context, chainID, expectedNext uint64, b
 				DO UPDATE SET tx_hash = token_transfers.tx_hash
 			`, chainID, transfer.TransactionHash, transfer.LogIndex, transfer.TokenAddress, transfer.FromAddress, transfer.ToAddress, transfer.Value); err != nil {
 				return fmt.Errorf("insert token transfer %s/%d: %w", transfer.TransactionHash, transfer.LogIndex, err)
+			}
+		}
+		for _, deadLetter := range indexed.DeadLetters {
+			payload, err := json.Marshal(map[string]any{
+				"address": deadLetter.Address,
+				"topics":  deadLetter.Topics,
+				"data":    deadLetter.Data,
+			})
+			if err != nil {
+				return fmt.Errorf("encode dead letter %s/%d: %w", deadLetter.TransactionHash, deadLetter.LogIndex, err)
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO dead_letters
+					(chain_id, block_number, block_hash, tx_hash, log_index, error, payload)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
+				ON CONFLICT (chain_id, tx_hash, log_index, block_hash) DO UPDATE
+				SET error = EXCLUDED.error, payload = EXCLUDED.payload,
+				    attempts = dead_letters.attempts + 1, last_seen_at = now()
+			`, chainID, block.Number, block.Hash, deadLetter.TransactionHash, deadLetter.LogIndex, deadLetter.Error, payload); err != nil {
+				return fmt.Errorf("insert dead letter %s/%d: %w", deadLetter.TransactionHash, deadLetter.LogIndex, err)
 			}
 		}
 	}

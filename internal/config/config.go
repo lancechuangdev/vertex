@@ -12,7 +12,13 @@ const (
 	defaultTimeout           = 10 * time.Second
 	defaultBatchSize         = uint64(100)
 	defaultConfirmationDepth = uint64(12)
+	defaultPollInterval      = 2 * time.Second
+	defaultRPCConcurrency    = 8
+	defaultMaxRetries        = 4
+	defaultRetryInitial      = 500 * time.Millisecond
 	maxBatchSize             = uint64(1000)
+	maxRPCConcurrency        = 128
+	maxRetries               = 20
 )
 
 type Config struct {
@@ -23,6 +29,10 @@ type Config struct {
 	StartBlock        uint64
 	BatchSize         uint64
 	ConfirmationDepth uint64
+	PollInterval      time.Duration
+	RPCConcurrency    int
+	MaxRetries        int
+	RetryInitial      time.Duration
 }
 
 func Load() (Config, error) {
@@ -33,6 +43,10 @@ func Load() (Config, error) {
 		RPCTimeout:        defaultTimeout,
 		BatchSize:         defaultBatchSize,
 		ConfirmationDepth: defaultConfirmationDepth,
+		PollInterval:      defaultPollInterval,
+		RPCConcurrency:    defaultRPCConcurrency,
+		MaxRetries:        defaultMaxRetries,
+		RetryInitial:      defaultRetryInitial,
 	}
 
 	if cfg.RPCURL == "" {
@@ -80,6 +94,38 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("CONFIRMATION_DEPTH must be a non-negative decimal integer")
 		}
 		cfg.ConfirmationDepth = depth
+	}
+
+	if value := os.Getenv("POLL_INTERVAL"); value != "" {
+		interval, err := time.ParseDuration(value)
+		if err != nil || interval <= 0 {
+			return Config{}, fmt.Errorf("POLL_INTERVAL must be a positive duration")
+		}
+		cfg.PollInterval = interval
+	}
+
+	if value := os.Getenv("RPC_CONCURRENCY"); value != "" {
+		concurrency, err := strconv.Atoi(value)
+		if err != nil || concurrency < 1 || concurrency > maxRPCConcurrency {
+			return Config{}, fmt.Errorf("RPC_CONCURRENCY must be between 1 and %d", maxRPCConcurrency)
+		}
+		cfg.RPCConcurrency = concurrency
+	}
+
+	if value := os.Getenv("MAX_RETRIES"); value != "" {
+		retries, err := strconv.Atoi(value)
+		if err != nil || retries < 0 || retries > maxRetries {
+			return Config{}, fmt.Errorf("MAX_RETRIES must be between 0 and %d", maxRetries)
+		}
+		cfg.MaxRetries = retries
+	}
+
+	if value := os.Getenv("RETRY_INITIAL_DELAY"); value != "" {
+		delay, err := time.ParseDuration(value)
+		if err != nil || delay <= 0 {
+			return Config{}, fmt.Errorf("RETRY_INITIAL_DELAY must be a positive duration")
+		}
+		cfg.RetryInitial = delay
 	}
 
 	return cfg, nil
