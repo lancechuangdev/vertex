@@ -11,12 +11,72 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 type Client struct {
 	url        string
 	httpClient *http.Client
+	limiter    *requestLimiter
 }
+
+type Option func(*Client)
+
+// WithRateLimit spaces requests across all concurrent workers in this client.
+// A value of 5 means at most five requests per second, with no initial burst.
+func WithRateLimit(requestsPerSecond float64) Option {
+	return func(client *Client) {
+		if requestsPerSecond > 0 {
+			client.limiter = &requestLimiter{interval: time.Duration(float64(time.Second) / requestsPerSecond)}
+		}
+	}
+}
+
+type requestLimiter struct {
+	mu       sync.Mutex
+	next     time.Time
+	interval time.Duration
+}
+
+func (l *requestLimiter) Wait(ctx context.Context) error {
+	l.mu.Lock()
+	now := time.Now()
+	reserved := now
+	if l.next.After(now) {
+		reserved = l.next
+	}
+	l.next = reserved.Add(l.interval)
+	l.mu.Unlock()
+
+	delay := time.Until(reserved)
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// HTTPError preserves status and retry guidance so callers can back off
+// without parsing an error string.
+type HTTPError struct {
+	Method     string
+	StatusCode int
+	Body       string
+	RetryDelay time.Duration
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("call %s: HTTP %d: %s", e.Method, e.StatusCode, e.Body)
+}
+
+func (e *HTTPError) RetryAfter() time.Duration { return e.RetryDelay }
 
 const maxResponseBytes = 32 << 20
 
@@ -103,8 +163,12 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
-func New(url string, httpClient *http.Client) *Client {
-	return &Client{url: url, httpClient: httpClient}
+func New(url string, httpClient *http.Client, options ...Option) *Client {
+	client := &Client{url: url, httpClient: httpClient}
+	for _, option := range options {
+		option(client)
+	}
+	return client
 }
 
 func (c *Client) ChainID(ctx context.Context) (uint64, error) {
@@ -304,6 +368,11 @@ func validHash(value string) bool {
 }
 
 func (c *Client) call(ctx context.Context, method string, params []any, result any) error {
+	if c.limiter != nil {
+		if err := c.limiter.Wait(ctx); err != nil {
+			return fmt.Errorf("wait to call %s: %w", method, err)
+		}
+	}
 	if params == nil {
 		params = []any{}
 	}
@@ -325,7 +394,10 @@ func (c *Client) call(ctx context.Context, method string, params []any, result a
 
 	if resp.StatusCode != http.StatusOK {
 		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("call %s: HTTP %d: %s", method, resp.StatusCode, strings.TrimSpace(string(limited)))
+		return &HTTPError{
+			Method: method, StatusCode: resp.StatusCode,
+			Body: strings.TrimSpace(string(limited)), RetryDelay: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 	}
 
 	var envelope response
@@ -342,4 +414,25 @@ func (c *Client) call(ctx context.Context, method string, params []any, result a
 		return fmt.Errorf("decode %s result: %w", method, err)
 	}
 	return nil
+}
+
+func parseRetryAfter(value string) time.Duration {
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0
+	}
+	delay := time.Until(when)
+	if delay < 0 {
+		return 0
+	}
+	return delay
 }

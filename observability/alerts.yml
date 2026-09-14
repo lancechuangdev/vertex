@@ -11,7 +11,7 @@ groups:
           description: "The indexer has been more than 12 blocks behind for 10 minutes."
 
       - alert: VertexRPCFailures
-        expr: sum(rate(vertex_rpc_requests_total{result="error"}[5m])) > 0.1
+        expr: sum by (chain_id) (rate(vertex_rpc_requests_total{result="error"}[5m])) > 0.1
         for: 5m
         labels:
           severity: warning
@@ -44,3 +44,21 @@ groups:
         annotations:
           summary: Vertex has unresolved poison events
           description: "One or more dead-letter events have remained unresolved for 15 minutes."
+
+      - alert: VertexIndexerStalled
+        expr: time() - vertex_last_success_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Vertex indexer has stopped completing cycles
+          description: "Chain {{ $labels.chain_id }} has not completed a successful indexing cycle for more than 10 minutes."
+
+      - alert: VertexIndexerMissing
+        expr: up{job="vertex-indexer"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Vertex indexer metrics are missing
+          description: "Prometheus cannot scrape the {{ $labels.network }} indexer at {{ $labels.instance }}."

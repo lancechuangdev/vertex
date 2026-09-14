@@ -76,6 +76,16 @@ func (s *Store) AcquireChainLock(ctx context.Context, chainID uint64) (func(cont
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin migrations: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	// Every chain service starts from the same image and may start at the same
+	// time. Serialize schema changes across those services.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(1447383637)`); err != nil {
+		return fmt.Errorf("lock migrations: %w", err)
+	}
 	files, err := fs.Glob(migrations, "migrations/*.sql")
 	if err != nil {
 		return fmt.Errorf("list migrations: %w", err)
@@ -85,9 +95,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", name, err)
 		}
-		if _, err := s.pool.Exec(ctx, string(sql)); err != nil {
+		if _, err := tx.Exec(ctx, string(sql)); err != nil {
 			return fmt.Errorf("apply migration %s: %w", name, err)
 		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit migrations: %w", err)
 	}
 	return nil
 }

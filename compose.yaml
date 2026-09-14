@@ -1,0 +1,71 @@
+x-indexer-environment: &indexer-environment
+  DATABASE_URL: postgres://vertex:vertex@postgres:5432/vertex?sslmode=disable
+  OBSERVABILITY_ADDR: :9090
+  BLOCK_BATCH_SIZE: ${BLOCK_BATCH_SIZE:-5}
+  CONFIRMATION_DEPTH: ${CONFIRMATION_DEPTH:-12}
+  POLL_INTERVAL: ${POLL_INTERVAL:-10s}
+  RPC_CONCURRENCY: ${RPC_CONCURRENCY:-2}
+  MAX_RETRIES: ${MAX_RETRIES:-6}
+  RETRY_INITIAL_DELAY: ${RETRY_INITIAL_DELAY:-5s}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: vertex
+      POSTGRES_USER: vertex
+      POSTGRES_PASSWORD: vertex
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vertex -d vertex"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  indexer-ethereum:
+    build: .
+    environment:
+      <<: *indexer-environment
+      RPC_URL: ${ETHEREUM_RPC_URL:?set ETHEREUM_RPC_URL in .env}
+      EXPECTED_CHAIN_ID: "1"
+      START_BLOCK: ${ETHEREUM_START_BLOCK:-0}
+      RPC_RATE_LIMIT: ${ETHEREUM_RPC_RATE_LIMIT:-2}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "9091:9090"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - indexer-ethereum
+      - indexer-base
+
+  indexer-base:
+    build: .
+    environment:
+      <<: *indexer-environment
+      RPC_URL: ${BASE_RPC_URL:?set BASE_RPC_URL in .env}
+      EXPECTED_CHAIN_ID: "8453"
+      START_BLOCK: ${BASE_START_BLOCK:-0}
+      RPC_RATE_LIMIT: ${BASE_RPC_RATE_LIMIT:-2}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "9092:9090"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

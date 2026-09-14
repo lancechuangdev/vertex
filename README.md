@@ -40,7 +40,7 @@ direction, not code that already exists.
 - [x] **Step 7 — Add production observability**
   - Expose health, readiness, Prometheus metrics, structured logs, and traces.
   - Alert on index lag, RPC failures, reorg depth, and outbox backlog.
-- [ ] **Step 8 — Containerize and deploy on AWS**
+- [x] **Step 8 — Containerize and deploy on AWS**
   - Add Docker, local Compose, and Terraform for ECS Fargate, RDS, MSK,
     ECR, secrets, autoscaling, backups, and alarms.
 
@@ -80,6 +80,7 @@ Configuration:
 | `CONFIRMATION_DEPTH` | no | `12` | Number of blocks required before observed events are promoted |
 | `POLL_INTERVAL` | no | `2s` | Delay between checks while caught up or after exhausted retries |
 | `RPC_CONCURRENCY` | no | `8` | Maximum concurrent receipt requests, from 1 through 128 |
+| `RPC_RATE_LIMIT` | no | `5` | Maximum RPC requests per second for this process |
 | `MAX_RETRIES` | no | `4` | Retries per failed indexing range, from 0 through 20 |
 | `RETRY_INITIAL_DELAY` | no | `500ms` | Initial exponential retry delay |
 | `OBSERVABILITY_ADDR` | no | `:9090` | Listen address for health, readiness, and Prometheus metrics |
@@ -93,13 +94,44 @@ Operational HTTP endpoints:
 Set `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` to
 export OpenTelemetry traces over OTLP/HTTP. Without an endpoint, tracing uses a
 no-op provider. Prometheus alert rules are provided in
-`observability/alerts.yml`.
+`observability/alerts.yml`; common PromQL queries and incident playbooks are in
+`observability/README.md`.
 
 Run the tests:
 
 ```bash
 go test ./...
 ```
+
+## Run multiple chains locally
+
+The service uses one process per chain. Copy `.env.example` to `.env`, set the
+Ethereum and Base RPC URLs, then start PostgreSQL, both indexers, and
+Prometheus:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Ethereum metrics are exposed at `localhost:9091`, Base metrics at
+`localhost:9092`, and the Prometheus UI at `localhost:9090`. Both indexers share
+PostgreSQL safely because persisted records, checkpoints, and worker locks are
+scoped by chain ID. Every application metric also carries a `chain_id` label.
+
+## Deploy to AWS
+
+Terraform in `deploy/terraform` creates one singleton ECS Fargate service per
+configured chain, plus ECR, encrypted RDS, optional MSK Serverless, private
+networking, Secrets Manager integration, backups, storage autoscaling, logs,
+and CloudWatch alarms. See `deploy/terraform/README.md` for prerequisites and
+deployment commands.
+
+RDS credentials are managed by RDS and injected into ECS without placing the
+password in Terraform configuration. RPC URLs must be created as Secrets
+Manager secrets before deployment. The MSK cluster is reserved for the future
+outbox publisher; this indexer currently persists outbox messages but does not
+send them to Kafka.
 
 ## Current layout
 
@@ -111,6 +143,7 @@ internal/indexer/  bounded range orchestration and continuous runner
 internal/postgres/ migrations, dead letters, locking, and atomic persistence
 internal/observability/ health endpoints, Prometheus metrics, and OTLP traces
 observability/       Prometheus alert rules
+deploy/terraform/    multi-chain AWS ECS, RDS, MSK, ECR, and monitoring stack
 ```
 
 ## Design invariants

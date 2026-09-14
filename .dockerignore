@@ -1,0 +1,8 @@
+.git
+.github
+**/.terraform
+deploy/terraform/*.tfstate*
+deploy/terraform/.terraform.lock.hcl
+bin
+coverage.out
+.env

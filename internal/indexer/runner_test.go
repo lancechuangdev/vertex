@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,6 +44,19 @@ func TestRunnerStopsDuringPoll(t *testing.T) {
 	}
 	if err := runner.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+type retryAfterTestError struct{ delay time.Duration }
+
+func (e retryAfterTestError) Error() string             { return "limited" }
+func (e retryAfterTestError) RetryAfter() time.Duration { return e.delay }
+
+func TestRetryDelayHonorsServerMinimum(t *testing.T) {
+	serverDelay := 10 * time.Second
+	got := retryDelay(fmt.Errorf("wrapped: %w", retryAfterTestError{delay: serverDelay}), time.Second)
+	if got < serverDelay || got > serverDelay+serverDelay/4 {
+		t.Fatalf("retryDelay() = %v, want between %v and %v", got, serverDelay, serverDelay+serverDelay/4)
 	}
 }
 

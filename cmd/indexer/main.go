@@ -39,21 +39,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("load configuration: %w", err)
 	}
 
-	tracer, shutdownTracing, err := observability.SetupTracing(ctx, "vertex-indexer")
-	if err != nil {
-		return fmt.Errorf("configure tracing: %w", err)
-	}
-	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := shutdownTracing(shutdownCtx); err != nil {
-			slog.Error("failed to flush traces", "error", err)
-		}
-	}()
-	registry := prometheus.NewRegistry()
-	metrics := observability.NewMetrics(registry)
-	rawClient := ethrpc.New(cfg.RPCURL, &http.Client{Timeout: cfg.RPCTimeout})
-	client := observability.Source{Next: rawClient, Metrics: metrics, Tracer: tracer}
+	rawClient := ethrpc.New(cfg.RPCURL, &http.Client{Timeout: cfg.RPCTimeout}, ethrpc.WithRateLimit(cfg.RPCRateLimit))
 	chainID, err := rawClient.ChainID(ctx)
 	if err != nil {
 		return fmt.Errorf("verify chain: %w", err)
@@ -61,6 +47,20 @@ func run(ctx context.Context, args []string) error {
 	if chainID != cfg.ExpectedChainID {
 		return fmt.Errorf("unexpected chain ID: node returned %d, expected %d", chainID, cfg.ExpectedChainID)
 	}
+	tracer, shutdownTracing, err := observability.SetupTracing(ctx, "vertex-indexer", chainID)
+	if err != nil {
+		return fmt.Errorf("configure tracing: %w", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := shutdownTracing(shutdownCtx); err != nil {
+			slog.Error("failed to flush traces", "chain_id", chainID, "error", err)
+		}
+	}()
+	registry := prometheus.NewRegistry()
+	metrics := observability.NewMetrics(registry, chainID)
+	client := observability.Source{Next: rawClient, Metrics: metrics, Tracer: tracer}
 
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {

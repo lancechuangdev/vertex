@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -14,6 +15,7 @@ const (
 	defaultConfirmationDepth = uint64(12)
 	defaultPollInterval      = 2 * time.Second
 	defaultRPCConcurrency    = 8
+	defaultRPCRateLimit      = 5.0
 	defaultMaxRetries        = 4
 	defaultRetryInitial      = 500 * time.Millisecond
 	defaultObservabilityAddr = ":9090"
@@ -32,21 +34,27 @@ type Config struct {
 	ConfirmationDepth uint64
 	PollInterval      time.Duration
 	RPCConcurrency    int
+	RPCRateLimit      float64
 	MaxRetries        int
 	RetryInitial      time.Duration
 	ObservabilityAddr string
 }
 
 func Load() (Config, error) {
+	databaseURL, err := loadDatabaseURL()
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		RPCURL:            os.Getenv("RPC_URL"),
-		DatabaseURL:       os.Getenv("DATABASE_URL"),
+		DatabaseURL:       databaseURL,
 		ExpectedChainID:   defaultChainID,
 		RPCTimeout:        defaultTimeout,
 		BatchSize:         defaultBatchSize,
 		ConfirmationDepth: defaultConfirmationDepth,
 		PollInterval:      defaultPollInterval,
 		RPCConcurrency:    defaultRPCConcurrency,
+		RPCRateLimit:      defaultRPCRateLimit,
 		MaxRetries:        defaultMaxRetries,
 		RetryInitial:      defaultRetryInitial,
 		ObservabilityAddr: defaultObservabilityAddr,
@@ -115,6 +123,14 @@ func Load() (Config, error) {
 		cfg.RPCConcurrency = concurrency
 	}
 
+	if value := os.Getenv("RPC_RATE_LIMIT"); value != "" {
+		rateLimit, err := strconv.ParseFloat(value, 64)
+		if err != nil || rateLimit <= 0 || rateLimit > 10000 {
+			return Config{}, fmt.Errorf("RPC_RATE_LIMIT must be greater than 0 and at most 10000")
+		}
+		cfg.RPCRateLimit = rateLimit
+	}
+
 	if value := os.Getenv("MAX_RETRIES"); value != "" {
 		retries, err := strconv.Atoi(value)
 		if err != nil || retries < 0 || retries > maxRetries {
@@ -136,4 +152,40 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// loadDatabaseURL accepts a complete URL for local development, or assembles
+// one from individual fields so ECS can inject only the password from Secrets
+// Manager without materializing the complete credential in Terraform state.
+func loadDatabaseURL() (string, error) {
+	if value := os.Getenv("DATABASE_URL"); value != "" {
+		return value, nil
+	}
+	host := os.Getenv("DATABASE_HOST")
+	password := os.Getenv("DATABASE_PASSWORD")
+	if host == "" && password == "" {
+		return "", nil
+	}
+	if host == "" || password == "" {
+		return "", fmt.Errorf("DATABASE_HOST and DATABASE_PASSWORD must both be set when DATABASE_URL is absent")
+	}
+	user := envOrDefault("DATABASE_USER", "vertex")
+	port := envOrDefault("DATABASE_PORT", "5432")
+	name := envOrDefault("DATABASE_NAME", "vertex")
+	sslmode := envOrDefault("DATABASE_SSLMODE", "require")
+	u := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, password),
+		Host:     host + ":" + port,
+		Path:     "/" + name,
+		RawQuery: url.Values{"sslmode": []string{sslmode}}.Encode(),
+	}
+	return u.String(), nil
+}
+
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }

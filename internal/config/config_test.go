@@ -13,6 +13,7 @@ func TestLoad(t *testing.T) {
 	t.Setenv("CONFIRMATION_DEPTH", "64")
 	t.Setenv("POLL_INTERVAL", "5s")
 	t.Setenv("RPC_CONCURRENCY", "16")
+	t.Setenv("RPC_RATE_LIMIT", "7.5")
 	t.Setenv("MAX_RETRIES", "6")
 	t.Setenv("RETRY_INITIAL_DELAY", "250ms")
 	t.Setenv("OBSERVABILITY_ADDR", "127.0.0.1:9191")
@@ -33,8 +34,38 @@ func TestLoad(t *testing.T) {
 	if cfg.PollInterval != 5*time.Second || cfg.RPCConcurrency != 16 || cfg.MaxRetries != 6 || cfg.RetryInitial != 250*time.Millisecond {
 		t.Fatalf("operational configuration = %+v", cfg)
 	}
+	if cfg.RPCRateLimit != 7.5 {
+		t.Fatalf("RPCRateLimit = %v, want 7.5", cfg.RPCRateLimit)
+	}
 	if cfg.ObservabilityAddr != "127.0.0.1:9191" {
 		t.Fatalf("ObservabilityAddr = %q", cfg.ObservabilityAddr)
+	}
+}
+
+func TestLoadBuildsDatabaseURLFromFields(t *testing.T) {
+	t.Setenv("RPC_URL", "https://rpc.example")
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("DATABASE_HOST", "db.internal")
+	t.Setenv("DATABASE_PASSWORD", "p@ss word")
+	t.Setenv("DATABASE_USER", "indexer")
+	t.Setenv("DATABASE_NAME", "chains")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	want := "postgres://indexer:p%40ss%20word@db.internal:5432/chains?sslmode=require"
+	if cfg.DatabaseURL != want {
+		t.Fatalf("DatabaseURL = %q, want %q", cfg.DatabaseURL, want)
+	}
+}
+
+func TestLoadRejectsIncompleteDatabaseFields(t *testing.T) {
+	t.Setenv("RPC_URL", "https://rpc.example")
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("DATABASE_HOST", "db.internal")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want incomplete database fields error")
 	}
 }
 

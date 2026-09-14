@@ -3,16 +3,48 @@ package ethrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestHTTPRateLimitPreservesRetryAfter(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{"Retry-After": []string{"7"}},
+			Body:       io.NopCloser(strings.NewReader(`{"code":-32005,"message":"Too Many Requests"}`)),
+		}, nil
+	})}
+	_, err := New("http://node.example", httpClient).BlockNumber(context.Background())
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("BlockNumber() error = %v, want HTTPError", err)
+	}
+	if httpErr.StatusCode != http.StatusTooManyRequests || httpErr.RetryAfter() != 7*time.Second {
+		t.Fatalf("HTTPError = %+v", httpErr)
+	}
+}
+
+func TestRateLimiterHonorsCancellation(t *testing.T) {
+	client := New("http://node.example", testHTTPClient(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`), WithRateLimit(1))
+	if _, err := client.BlockNumber(context.Background()); err != nil {
+		t.Fatalf("first BlockNumber() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := client.BlockNumber(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("second BlockNumber() error = %v, want context cancellation", err)
+	}
 }
 
 func testHTTPClient(body string) *http.Client {

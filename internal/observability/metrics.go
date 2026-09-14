@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"fmt"
 	"math"
 	"time"
 
@@ -23,7 +24,8 @@ type Metrics struct {
 	LastSuccess     prometheus.Gauge
 }
 
-func NewMetrics(reg prometheus.Registerer) *Metrics {
+func NewMetrics(reg prometheus.Registerer, chainID uint64) *Metrics {
+	reg = prometheus.WrapRegistererWith(prometheus.Labels{"chain_id": fmt.Sprint(chainID)}, reg)
 	m := &Metrics{
 		ChainHead:       prometheus.NewGauge(prometheus.GaugeOpts{Name: "vertex_chain_head", Help: "Latest block reported by the RPC node."}),
 		CheckpointNext:  prometheus.NewGauge(prometheus.GaugeOpts{Name: "vertex_checkpoint_next_block", Help: "Next block the indexer will process."}),

@@ -37,7 +37,7 @@ func TestHealthAndReadiness(t *testing.T) {
 
 func TestMetricsEndpoint(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	metrics := NewMetrics(registry)
+	metrics := NewMetrics(registry, 1)
 	metrics.ObserveChain(20, 16)
 	handler := Handler(registry, func(context.Context) error { return nil })
 
@@ -46,7 +46,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("metrics status = %d, want 200", response.Code)
 	}
-	if body := response.Body.String(); !containsAll(body, "vertex_chain_head 20", "vertex_index_lag_blocks 5") {
+	if body := response.Body.String(); !containsAll(body, `vertex_chain_head{chain_id="1"} 20`, `vertex_index_lag_blocks{chain_id="1"} 5`) {
 		t.Fatalf("metrics body missing expected values:\n%s", body)
 	}
 }

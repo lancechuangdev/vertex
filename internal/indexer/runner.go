@@ -2,9 +2,15 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 )
+
+type retryAfterError interface {
+	RetryAfter() time.Duration
+}
 
 type Runner struct {
 	Service      Service
@@ -57,7 +63,8 @@ func (r Runner) runWithRetry(ctx context.Context) (uint64, error) {
 		if attempt == r.MaxRetries {
 			break
 		}
-		timer := time.NewTimer(delay)
+		wait := retryDelay(lastErr, delay)
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -69,4 +76,18 @@ func (r Runner) runWithRetry(ctx context.Context) (uint64, error) {
 		}
 	}
 	return 0, fmt.Errorf("index range failed after %d attempts: %w", r.MaxRetries+1, lastErr)
+}
+
+func retryDelay(err error, fallback time.Duration) time.Duration {
+	var limited retryAfterError
+	if errors.As(err, &limited) && limited.RetryAfter() > fallback {
+		fallback = limited.RetryAfter()
+	}
+	// Independent workers otherwise retry at the same instant and create a
+	// second traffic spike. Add up to 25 percent jitter.
+	jitterRange := fallback / 4
+	if jitterRange <= 0 {
+		return fallback
+	}
+	return fallback + time.Duration(rand.Int64N(int64(jitterRange)+1))
 }
