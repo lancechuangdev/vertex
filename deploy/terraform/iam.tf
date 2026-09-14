@@ -43,6 +43,22 @@ resource "aws_iam_role" "task" {
   })
 }
 
+resource "aws_iam_role_policy" "task_xray" {
+  name = "xray"
+  role = aws_iam_role.task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "xray:PutTelemetryRecords",
+        "xray:PutTraceSegments"
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
 resource "aws_iam_role_policy" "task_msk" {
   count = var.enable_msk ? 1 : 0
   name  = "msk"

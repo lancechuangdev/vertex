@@ -27,6 +27,12 @@ variable "image_tag" {
   type        = string
 }
 
+variable "adot_collector_image" {
+  description = "Pinned AWS Distro for OpenTelemetry Collector image used as an ECS sidecar."
+  type        = string
+  default     = "public.ecr.aws/aws-observability/aws-otel-collector:v0.49.0"
+}
+
 variable "chains" {
   description = "One singleton ECS service per chain. RPC secrets must contain the URL as plaintext."
   type = map(object({
