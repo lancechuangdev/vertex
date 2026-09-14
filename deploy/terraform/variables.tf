@@ -71,7 +71,7 @@ variable "database_username" {
 
 variable "database_instance_class" {
   type    = string
-  default = "db.t4g.micro"
+  default = "db.r5.large"
 }
 
 variable "database_allocated_storage" {

@@ -10,12 +10,16 @@ chains = {
     rpc_secret_arn     = "arn:aws:secretsmanager:us-west-2:123456789012:secret:vertex/ethereum-rpc-AbCdEf"
     start_block        = 0
     confirmation_depth = 12
+    poll_interval      = "5s"
+    rpc_rate_limit     = 2
   }
   base = {
     chain_id           = 8453
     rpc_secret_arn     = "arn:aws:secretsmanager:us-west-2:123456789012:secret:vertex/base-rpc-AbCdEf"
     start_block        = 0
     confirmation_depth = 12
+    poll_interval      = "1s"
+    rpc_rate_limit     = 2
   }
 }
 

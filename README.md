@@ -119,6 +119,13 @@ Ethereum metrics are exposed at `localhost:9091`, Base metrics at
 PostgreSQL safely because persisted records, checkpoints, and worker locks are
 scoped by chain ID. Every application metric also carries a `chain_id` label.
 
+Polling is configured per chain because block production differs. The local
+defaults are `ETHEREUM_POLL_INTERVAL=5s` and `BASE_POLL_INTERVAL=1s`. Polling
+only occurs while caught up or after exhausted retries; catch-up cycles continue
+without an added poll delay. `RPC_RATE_LIMIT` separately caps all JSON-RPC calls
+per second. Polls consume that budget, but most usage comes from block and
+transaction-receipt requests.
+
 ## Deploy to AWS
 
 Terraform in `deploy/terraform` creates one singleton ECS Fargate service per

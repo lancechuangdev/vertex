@@ -10,6 +10,13 @@ RDS is pinned to the PostgreSQL 17 major family and automatic minor upgrades
 are enabled. This preserves Vertex's tested major-version boundary while RDS
 applies supported PostgreSQL 17 maintenance and security releases.
 
+Set `poll_interval` independently for every chain. A useful starting point is
+roughly half the block-production interval without polling extremely fast:
+Ethereum `5s`, Base `1s`, Arbitrum `500ms`, and opBNB `500ms`. The independent
+`rpc_rate_limit` caps total calls per second, including head polls, block
+requests, and receipt requests; size it to the RPC provider quota and expected
+transaction volume.
+
 It creates a two-AZ VPC, private Fargate tasks, NAT egress for JSON-RPC calls,
 ECR, encrypted RDS with automated backups and storage autoscaling, CloudWatch
 logs/alarms, and optionally an IAM-authenticated MSK Serverless cluster. MSK is
