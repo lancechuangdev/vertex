@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 )
 
 type Metrics struct {
@@ -43,7 +44,7 @@ func NewMetrics(reg prometheus.Registerer, chainID uint64) *Metrics {
 	}
 	reg.MustRegister(m.ChainHead, m.CheckpointNext, m.IndexLag, m.OutboxBacklog, m.DeadLetterQueue,
 		m.RPCRequests, m.RPCDuration, m.Runs, m.Blocks, m.Reorganizations, m.ReorgDepth, m.DeadLetters, m.LastSuccess)
-	reg.MustRegister(prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return m
 }
 

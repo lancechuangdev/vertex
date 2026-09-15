@@ -18,7 +18,9 @@ type Source struct {
 }
 
 func (s Source) BlockNumber(ctx context.Context) (uint64, error) {
-	value, err := observeRPC(ctx, s, "eth_blockNumber", func(ctx context.Context) (uint64, error) { return s.Next.BlockNumber(ctx) })
+	value, err := observeRPC(ctx, s, "eth_blockNumber", func(ctx context.Context) (uint64, error) {
+		return s.Next.BlockNumber(ctx)
+	})
 	return value, err
 }
 
