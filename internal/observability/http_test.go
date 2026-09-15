@@ -51,6 +51,25 @@ func TestMetricsEndpoint(t *testing.T) {
 	}
 }
 
+func TestTraceObservabilityRequest(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "/metrics", want: false},
+		{path: "/healthz", want: false},
+		{path: "/readyz", want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			if got := traceObservabilityRequest(request); got != test.want {
+				t.Fatalf("traceObservabilityRequest(%q) = %t, want %t", test.path, got, test.want)
+			}
+		})
+	}
+}
+
 func containsAll(value string, values ...string) bool {
 	for _, candidate := range values {
 		if !strings.Contains(value, candidate) {

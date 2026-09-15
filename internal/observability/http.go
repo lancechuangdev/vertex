@@ -23,7 +23,11 @@ func Handler(reg prometheus.Gatherer, ready func(context.Context) error) http.Ha
 		}
 		writeStatus(w, http.StatusOK, "ready")
 	})
-	return otelhttp.NewHandler(mux, "observability.http")
+	return otelhttp.NewHandler(mux, "observability.http", otelhttp.WithFilter(traceObservabilityRequest))
+}
+
+func traceObservabilityRequest(r *http.Request) bool {
+	return r.URL.Path != "/metrics" && r.URL.Path != "/healthz"
 }
 
 func writeStatus(w http.ResponseWriter, code int, status string) {
