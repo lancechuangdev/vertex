@@ -103,10 +103,16 @@ func (s Service) runOnce(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("read checkpoint: %w", err)
 	}
+	trace.SpanFromContext(ctx).AddEvent("checkpoint.loaded", trace.WithAttributes(
+		attribute.Int64("checkpoint.next_block", int64(next)),
+	))
 	latest, err := s.Source.BlockNumber(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("read latest block: %w", err)
 	}
+	trace.SpanFromContext(ctx).AddEvent("chain_head.observed", trace.WithAttributes(
+		attribute.Int64("chain.head", int64(latest)),
+	))
 	if s.Observer != nil {
 		s.Observer.ObserveChain(latest, next)
 	}
@@ -151,14 +157,29 @@ func (s Service) runOnce(ctx context.Context) (uint64, error) {
 			break
 		}
 	}
+	trace.SpanFromContext(ctx).AddEvent("blocks.fetched", trace.WithAttributes(
+		attribute.Int64("block.range.start", int64(next)),
+		attribute.Int64("block.range.end", int64(end)),
+		attribute.Int64("block.count", int64(len(blocks))),
+	))
 	if err := s.Store.CommitRange(ctx, s.ChainID, next, blocks); err != nil {
 		return 0, fmt.Errorf("commit blocks %d-%d: %w", next, end, err)
 	}
+	trace.SpanFromContext(ctx).AddEvent("range.committed", trace.WithAttributes(
+		attribute.Int64("block.range.start", int64(next)),
+		attribute.Int64("block.range.end", int64(end)),
+		attribute.Int64("block.count", int64(len(blocks))),
+	))
+	var deadLetters uint64
+	for _, block := range blocks {
+		deadLetters += uint64(len(block.DeadLetters))
+	}
+	if deadLetters > 0 {
+		trace.SpanFromContext(ctx).AddEvent("dead_letters.created", trace.WithAttributes(
+			attribute.Int64("dead_letter.count", int64(deadLetters)),
+		))
+	}
 	if s.Observer != nil {
-		var deadLetters uint64
-		for _, block := range blocks {
-			deadLetters += uint64(len(block.DeadLetters))
-		}
 		s.Observer.ObserveBlocks(uint64(len(blocks)))
 		if deadLetters > 0 {
 			s.Observer.ObserveDeadLetters(deadLetters)
@@ -292,21 +313,31 @@ func (s Service) recoverReorganization(ctx context.Context, next, latest uint64)
 				return next, nil
 			}
 			replayFrom := number + 1
+			depth := tip - number
 			if s.Observer != nil {
-				s.Observer.ObserveReorganization(tip - number)
+				s.Observer.ObserveReorganization(depth)
 			}
 			if err := s.Store.Rewind(ctx, s.ChainID, next, replayFrom, true); err != nil {
 				return 0, fmt.Errorf("rewind to block %d: %w", replayFrom, err)
 			}
+			trace.SpanFromContext(ctx).AddEvent("chain.reorganization_detected", trace.WithAttributes(
+				attribute.Int64("reorg.depth", int64(depth)),
+				attribute.Int64("replay.from_block", int64(replayFrom)),
+			))
 			return replayFrom, nil
 		}
 		if number == s.Start {
+			depth := tip - s.Start + 1
 			if s.Observer != nil {
-				s.Observer.ObserveReorganization(tip - s.Start + 1)
+				s.Observer.ObserveReorganization(depth)
 			}
 			if err := s.Store.Rewind(ctx, s.ChainID, next, s.Start, true); err != nil {
 				return 0, fmt.Errorf("rewind to start block %d: %w", s.Start, err)
 			}
+			trace.SpanFromContext(ctx).AddEvent("chain.reorganization_detected", trace.WithAttributes(
+				attribute.Int64("reorg.depth", int64(depth)),
+				attribute.Int64("replay.from_block", int64(s.Start)),
+			))
 			return s.Start, nil
 		}
 	}
@@ -317,9 +348,14 @@ func (s Service) promoteConfirmed(ctx context.Context, latest uint64) error {
 		return nil
 	}
 	confirmedThrough := latest - s.ConfirmationDepth
-	if _, err := s.Store.PromoteConfirmed(ctx, s.ChainID, confirmedThrough); err != nil {
+	promoted, err := s.Store.PromoteConfirmed(ctx, s.ChainID, confirmedThrough)
+	if err != nil {
 		return fmt.Errorf("promote blocks through %d: %w", confirmedThrough, err)
 	}
+	trace.SpanFromContext(ctx).AddEvent("confirmations.promoted", trace.WithAttributes(
+		attribute.Int64("confirmed.through_block", int64(confirmedThrough)),
+		attribute.Int64("confirmed.count", int64(promoted)),
+	))
 	return nil
 }
 

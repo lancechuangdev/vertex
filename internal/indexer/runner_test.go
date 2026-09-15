@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/example/vertex/internal/ethrpc"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type retrySource struct {
@@ -26,11 +28,26 @@ func (s *retrySource) BlockNumber(context.Context) (uint64, error) {
 func TestRunnerRetriesTransientFailure(t *testing.T) {
 	source := &retrySource{fakeSource: fakeSource{latest: 9}}
 	source.failures.Store(2)
-	service := Service{Source: source, Store: &fakeStore{next: 10}, ChainID: 1, BatchSize: 1}
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	service := Service{
+		Source: source, Store: &fakeStore{next: 10}, ChainID: 1, BatchSize: 1,
+		Tracer: provider.Tracer("test"),
+	}
 	runner := Runner{Service: service, RetryInitial: time.Nanosecond, MaxRetries: 2}
 
 	if _, err := runner.runWithRetry(context.Background()); err != nil {
 		t.Fatalf("runWithRetry() error = %v", err)
+	}
+	span := endedSpanNamed(t, recorder, "indexer.run_with_retry")
+	var retries int
+	for _, event := range span.Events() {
+		if event.Name == "indexer.retry_scheduled" {
+			retries++
+		}
+	}
+	if retries != 2 {
+		t.Fatalf("retry events = %d, want 2", retries)
 	}
 }
 

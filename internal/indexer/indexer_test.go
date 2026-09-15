@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/example/vertex/internal/ethrpc"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type fakeSource struct {
@@ -158,6 +160,56 @@ func TestRunOnceFetchesReceiptsAndDecodesTransfers(t *testing.T) {
 	}
 }
 
+func TestRunOnceEmitsProgressAndDeadLetterEvents(t *testing.T) {
+	const txHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	source := &fakeSource{
+		latest: 7,
+		blocks: map[uint64]ethrpc.Block{
+			7: {Number: 7, Transactions: []ethrpc.Transaction{{Hash: txHash}}},
+		},
+		receipts: map[string]ethrpc.Receipt{
+			txHash: {
+				TransactionHash: txHash,
+				BlockNumber:     7,
+				Logs: []ethrpc.Log{{
+					Index: 3, Address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					Topics: []string{transferTopic}, Data: "0x00",
+				}},
+			},
+		},
+	}
+	service := Service{
+		Source: source, Store: &fakeStore{next: 7}, ChainID: 1, BatchSize: 1,
+		Tracer: provider.Tracer("test"),
+	}
+
+	if _, err := service.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+
+	span := endedSpanNamed(t, recorder, "indexer.run_once")
+	want := map[string]bool{
+		"checkpoint.loaded":      false,
+		"chain_head.observed":    false,
+		"blocks.fetched":         false,
+		"range.committed":        false,
+		"dead_letters.created":   false,
+		"confirmations.promoted": false,
+	}
+	for _, event := range span.Events() {
+		if _, ok := want[event.Name]; ok {
+			want[event.Name] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("span event %q not emitted", name)
+		}
+	}
+}
+
 func TestRunOncePromotesOnlyDeepEnoughBlocks(t *testing.T) {
 	source := &fakeSource{latest: 20}
 	store := &fakeStore{next: 21}
@@ -204,7 +256,12 @@ func TestRunOnceRewindsToCommonAncestorAndReplays(t *testing.T) {
 		next:   13,
 		hashes: map[uint64]string{10: commonHash, 11: "0xold11", 12: "0xold12"},
 	}
-	service := Service{Source: source, Store: store, ChainID: 1, Start: 10, BatchSize: 3, ConfirmationDepth: 100}
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	service := Service{
+		Source: source, Store: store, ChainID: 1, Start: 10, BatchSize: 3, ConfirmationDepth: 100,
+		Tracer: provider.Tracer("test"),
+	}
 
 	count, err := service.RunOnce(context.Background())
 	if err != nil {
@@ -216,6 +273,13 @@ func TestRunOnceRewindsToCommonAncestorAndReplays(t *testing.T) {
 	if len(store.committed) != 3 || store.committed[0].Block.Number != 11 || store.committed[2].Block.Number != 13 {
 		t.Fatalf("replayed blocks = %+v", store.committed)
 	}
+	span := endedSpanNamed(t, recorder, "indexer.run_once")
+	for _, event := range span.Events() {
+		if event.Name == "chain.reorganization_detected" {
+			return
+		}
+	}
+	t.Fatal("chain.reorganization_detected event not emitted")
 }
 
 func TestRunOnceRejectsRegressedNodeHead(t *testing.T) {
@@ -240,4 +304,15 @@ func TestReplayFromRewindsWithoutReorgCompensation(t *testing.T) {
 	if len(store.rewoundTo) != 1 || store.rewoundTo[0] != 15 || store.rewindCompensate[0] {
 		t.Fatalf("rewind = %v compensate = %v", store.rewoundTo, store.rewindCompensate)
 	}
+}
+
+func endedSpanNamed(t *testing.T, recorder *tracetest.SpanRecorder, name string) sdktrace.ReadOnlySpan {
+	t.Helper()
+	for _, span := range recorder.Ended() {
+		if span.Name() == name {
+			return span
+		}
+	}
+	t.Fatalf("ended span %q not found", name)
+	return nil
 }

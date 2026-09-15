@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type retryAfterError interface {
@@ -52,11 +56,19 @@ func (r Runner) Run(ctx context.Context) error {
 }
 
 func (r Runner) runWithRetry(ctx context.Context) (uint64, error) {
+	var span trace.Span
+	if r.Service.Tracer != nil {
+		ctx, span = r.Service.Tracer.Start(ctx, "indexer.run_with_retry")
+		defer span.End()
+	}
 	delay := r.RetryInitial
 	var lastErr error
 	for attempt := 0; attempt <= r.MaxRetries; attempt++ {
 		indexed, err := r.Service.RunOnce(ctx)
 		if err == nil {
+			if span != nil {
+				span.SetAttributes(attribute.Int("indexer.attempts", attempt+1))
+			}
 			return indexed, nil
 		}
 		lastErr = err
@@ -64,6 +76,12 @@ func (r Runner) runWithRetry(ctx context.Context) (uint64, error) {
 			break
 		}
 		wait := retryDelay(lastErr, delay)
+		if span != nil {
+			span.AddEvent("indexer.retry_scheduled", trace.WithAttributes(
+				attribute.Int("retry.attempt", attempt+2),
+				attribute.Int64("retry.delay_ms", wait.Milliseconds()),
+			))
+		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
@@ -75,7 +93,13 @@ func (r Runner) runWithRetry(ctx context.Context) (uint64, error) {
 			delay *= 2
 		}
 	}
-	return 0, fmt.Errorf("index range failed after %d attempts: %w", r.MaxRetries+1, lastErr)
+	err := fmt.Errorf("index range failed after %d attempts: %w", r.MaxRetries+1, lastErr)
+	if span != nil {
+		span.SetAttributes(attribute.Int("indexer.attempts", r.MaxRetries+1))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return 0, err
 }
 
 func retryDelay(err error, fallback time.Duration) time.Duration {
