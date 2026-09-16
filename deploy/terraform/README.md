@@ -18,19 +18,22 @@ requests, and receipt requests; size it to the RPC provider quota and expected
 transaction volume.
 
 It creates a two-AZ VPC, private Fargate tasks, NAT egress for JSON-RPC calls,
-ECR, encrypted RDS with automated backups and storage autoscaling, CloudWatch
-logs/alarms, and optionally an IAM-authenticated MSK Serverless cluster. MSK is
-reserved for the outbox publisher: the current indexer writes the transactional
-outbox but does not yet publish it.
+ECR, encrypted RDS with automated backups and storage autoscaling, an Amazon
+Managed Service for Prometheus workspace, CloudWatch logs/alarms, and optionally
+an IAM-authenticated MSK Serverless cluster. MSK is reserved for the outbox
+publisher: the current indexer writes the transactional outbox but does not yet
+publish it.
 
 Each chain task also runs a pinned AWS Distro for OpenTelemetry (ADOT)
 Collector sidecar. The indexer exports OTLP/HTTP traces to
 `http://localhost:4318`; the Collector batches them and exports them to AWS
-X-Ray using the task role. The sidecar uses ADOT's built-in
-`/etc/ecs/ecs-default-config.yaml`, so no collector configuration or credentials
-are stored in Terraform state. Indexer and collector logs use separate
-CloudWatch log groups. Override `adot_collector_image` only to roll out a tested,
-explicitly pinned ADOT release.
+X-Ray using the task role. The Collector also scrapes the colocated indexer's
+`http://127.0.0.1:9090/metrics` endpoint every 15 seconds and remote-writes the
+samples to the managed Prometheus workspace. Terraform generates the collector
+configuration for each chain and supplies it through ADOT's `env` configuration
+provider, so a custom collector image is not required. Indexer and collector
+logs use separate CloudWatch log groups. Override `adot_collector_image` only to
+roll out a tested, explicitly pinned ADOT release.
 
 The Collector reserves 128 MiB inside each chain's existing Fargate task and
 receives 64 CPU shares. The chain-level `cpu` and `memory` values are total task
@@ -77,9 +80,11 @@ ordinary task environment values.
 
 CloudWatch alarms cover missing tasks, sustained task CPU, RDS CPU, and two RDS
 storage levels: warning below 20 percent and critical below 10 percent of the
-configured allocation. Supply `alarm_sns_topic_arn` to route alarm transitions. Application
-Prometheus rules remain in `observability/alerts.yml`; connect the private
-`:9090/metrics` task endpoints to your chosen managed scraper during platform
-integration. Application traces are available under **X-Ray > Traces** in the
+configured allocation. Supply `alarm_sns_topic_arn` to route alarm transitions.
+Application Prometheus rules remain in `observability/alerts.yml`; they are not
+installed into the managed workspace by this stack. Connect the workspace to
+Amazon Managed Grafana or use the AMP query API to run the PromQL examples in
+`observability/README.md`. The `prometheus_endpoint` output is the workspace's
+base query URL. Application traces are available under **X-Ray > Traces** in the
 AWS console under the `vertex-indexer` service. Each trace carries a `chain.id`
 resource attribute that identifies its chain.

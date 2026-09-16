@@ -93,12 +93,13 @@ resource "aws_ecs_task_definition" "indexer" {
       name              = "adot-collector"
       image             = var.adot_collector_image
       essential         = true
-      command           = ["--config=/etc/ecs/ecs-default-config.yaml"]
+      command           = ["--config=env:ADOT_CONFIG"]
       cpu               = 64
       memoryReservation = 128
       stopTimeout       = 120
       environment = [
-        { name = "AWS_REGION", value = var.aws_region }
+        { name = "AWS_REGION", value = var.aws_region },
+        { name = "ADOT_CONFIG", value = local.adot_configs[each.key] }
       ]
       healthCheck = {
         command     = ["CMD-SHELL", "/healthcheck"]
@@ -145,6 +146,7 @@ resource "aws_ecs_service" "indexer" {
 
   depends_on = [
     aws_iam_role_policy_attachment.execution,
+    aws_iam_role_policy.task_amp,
     aws_iam_role_policy.task_xray
   ]
 }

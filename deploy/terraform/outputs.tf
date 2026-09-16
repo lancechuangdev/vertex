@@ -10,6 +10,14 @@ output "ecs_services" {
   value = { for name, service in aws_ecs_service.indexer : name => service.name }
 }
 
+output "prometheus_workspace_id" {
+  value = aws_prometheus_workspace.vertex.id
+}
+
+output "prometheus_endpoint" {
+  value = aws_prometheus_workspace.vertex.prometheus_endpoint
+}
+
 output "database_endpoint" {
   value = aws_db_instance.this.endpoint
 }

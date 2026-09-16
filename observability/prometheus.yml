@@ -6,6 +6,8 @@ rule_files:
 
 scrape_configs:
   - job_name: vertex-indexer
+    scheme: http
+    metrics_path: /metrics
     static_configs:
       - targets: [indexer-ethereum:9090]
         labels:

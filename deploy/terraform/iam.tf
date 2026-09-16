@@ -59,6 +59,19 @@ resource "aws_iam_role_policy" "task_xray" {
   })
 }
 
+resource "aws_iam_role_policy" "task_amp" {
+  name = "amp-remote-write"
+  role = aws_iam_role.task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["aps:RemoteWrite"]
+      Resource = aws_prometheus_workspace.vertex.arn
+    }]
+  })
+}
+
 resource "aws_iam_role_policy" "task_msk" {
   count = var.enable_msk ? 1 : 0
   name  = "msk"
