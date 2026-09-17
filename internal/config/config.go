@@ -9,35 +9,43 @@ import (
 )
 
 const (
-	defaultChainID           = uint64(1)
-	defaultTimeout           = 10 * time.Second
-	defaultBatchSize         = uint64(100)
-	defaultConfirmationDepth = uint64(12)
-	defaultPollInterval      = 2 * time.Second
-	defaultRPCConcurrency    = 8
-	defaultRPCRateLimit      = 5.0
-	defaultMaxRetries        = 4
-	defaultRetryInitial      = 500 * time.Millisecond
-	defaultObservabilityAddr = ":9090"
-	maxBatchSize             = uint64(1000)
-	maxRPCConcurrency        = 128
-	maxRetries               = 20
+	defaultChainID            = uint64(1)
+	defaultTimeout            = 10 * time.Second
+	defaultBatchSize          = uint64(100)
+	defaultConfirmationDepth  = uint64(12)
+	defaultPollInterval       = 2 * time.Second
+	defaultRPCConcurrency     = 8
+	defaultRPCRateLimit       = 5.0
+	defaultMaxRetries         = 4
+	defaultRetryInitial       = 500 * time.Millisecond
+	defaultObservabilityAddr  = ":9090"
+	defaultOutboxBatchSize    = 100
+	defaultOutboxPollInterval = time.Second
+	defaultOutboxLease        = 30 * time.Second
+	defaultOutboxRetryInitial = time.Second
+	maxBatchSize              = uint64(1000)
+	maxRPCConcurrency         = 128
+	maxRetries                = 20
 )
 
 type Config struct {
-	RPCURL            string
-	DatabaseURL       string
-	ExpectedChainID   uint64
-	RPCTimeout        time.Duration
-	StartBlock        uint64
-	BatchSize         uint64
-	ConfirmationDepth uint64
-	PollInterval      time.Duration
-	RPCConcurrency    int
-	RPCRateLimit      float64
-	MaxRetries        int
-	RetryInitial      time.Duration
-	ObservabilityAddr string
+	RPCURL             string
+	DatabaseURL        string
+	ExpectedChainID    uint64
+	RPCTimeout         time.Duration
+	StartBlock         uint64
+	BatchSize          uint64
+	ConfirmationDepth  uint64
+	PollInterval       time.Duration
+	RPCConcurrency     int
+	RPCRateLimit       float64
+	MaxRetries         int
+	RetryInitial       time.Duration
+	ObservabilityAddr  string
+	OutboxBatchSize    int
+	OutboxPollInterval time.Duration
+	OutboxLease        time.Duration
+	OutboxRetryInitial time.Duration
 }
 
 func Load() (Config, error) {
@@ -46,18 +54,22 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{
-		RPCURL:            os.Getenv("RPC_URL"),
-		DatabaseURL:       databaseURL,
-		ExpectedChainID:   defaultChainID,
-		RPCTimeout:        defaultTimeout,
-		BatchSize:         defaultBatchSize,
-		ConfirmationDepth: defaultConfirmationDepth,
-		PollInterval:      defaultPollInterval,
-		RPCConcurrency:    defaultRPCConcurrency,
-		RPCRateLimit:      defaultRPCRateLimit,
-		MaxRetries:        defaultMaxRetries,
-		RetryInitial:      defaultRetryInitial,
-		ObservabilityAddr: defaultObservabilityAddr,
+		RPCURL:             os.Getenv("RPC_URL"),
+		DatabaseURL:        databaseURL,
+		ExpectedChainID:    defaultChainID,
+		RPCTimeout:         defaultTimeout,
+		BatchSize:          defaultBatchSize,
+		ConfirmationDepth:  defaultConfirmationDepth,
+		PollInterval:       defaultPollInterval,
+		RPCConcurrency:     defaultRPCConcurrency,
+		RPCRateLimit:       defaultRPCRateLimit,
+		MaxRetries:         defaultMaxRetries,
+		RetryInitial:       defaultRetryInitial,
+		ObservabilityAddr:  defaultObservabilityAddr,
+		OutboxBatchSize:    defaultOutboxBatchSize,
+		OutboxPollInterval: defaultOutboxPollInterval,
+		OutboxLease:        defaultOutboxLease,
+		OutboxRetryInitial: defaultOutboxRetryInitial,
 	}
 
 	if cfg.RPCURL == "" {
@@ -149,6 +161,26 @@ func Load() (Config, error) {
 
 	if value := os.Getenv("OBSERVABILITY_ADDR"); value != "" {
 		cfg.ObservabilityAddr = value
+	}
+	if value := os.Getenv("OUTBOX_BATCH_SIZE"); value != "" {
+		size, err := strconv.Atoi(value)
+		if err != nil || size < 1 || size > 1000 {
+			return Config{}, fmt.Errorf("OUTBOX_BATCH_SIZE must be between 1 and 1000")
+		}
+		cfg.OutboxBatchSize = size
+	}
+	for name, target := range map[string]*time.Duration{
+		"OUTBOX_POLL_INTERVAL":       &cfg.OutboxPollInterval,
+		"OUTBOX_LEASE":               &cfg.OutboxLease,
+		"OUTBOX_RETRY_INITIAL_DELAY": &cfg.OutboxRetryInitial,
+	} {
+		if value := os.Getenv(name); value != "" {
+			duration, err := time.ParseDuration(value)
+			if err != nil || duration <= 0 {
+				return Config{}, fmt.Errorf("%s must be a positive duration", name)
+			}
+			*target = duration
+		}
 	}
 
 	return cfg, nil

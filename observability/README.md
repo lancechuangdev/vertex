@@ -177,9 +177,9 @@ vertex_dead_letter_backlog
 increase(vertex_dead_letters_total[1h])
 ```
 
-The indexer currently writes the transactional outbox but does not publish its
-messages. Once confirmed transfers exist, the backlog will grow until a
-publisher is deployed.
+The relay publishes valid outbox messages and marks them complete. A growing
+backlog therefore indicates delivery failures, an unhealthy relay, or
+insufficient publishing capacity.
 
 ## Process and scrape health
 

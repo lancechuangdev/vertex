@@ -84,6 +84,10 @@ Configuration:
 | `MAX_RETRIES` | no | `4` | Retries per failed indexing range, from 0 through 20 |
 | `RETRY_INITIAL_DELAY` | no | `500ms` | Initial exponential retry delay |
 | `OBSERVABILITY_ADDR` | no | `:9090` | Listen address for health, readiness, and Prometheus metrics |
+| `OUTBOX_BATCH_SIZE` | no | `100` | Maximum rows leased in one relay pass |
+| `OUTBOX_POLL_INTERVAL` | no | `1s` | Delay when the relay has no full batch to drain |
+| `OUTBOX_LEASE` | no | `30s` | Time before an interrupted delivery can be reclaimed |
+| `OUTBOX_RETRY_INITIAL_DELAY` | no | `1s` | Initial failed-publish retry delay |
 
 Operational HTTP endpoints:
 
@@ -96,6 +100,12 @@ export OpenTelemetry traces over OTLP/HTTP. Without an endpoint, tracing uses a
 no-op provider. Prometheus alert rules are provided in
 `observability/alerts.yml`; common PromQL queries and incident playbooks are in
 `observability/README.md`.
+
+The built-in relay claims unpublished rows with `FOR UPDATE SKIP LOCKED`, logs
+each message as its delivery transport, and then marks it published.
+Delivery is at least once: consumers must deduplicate with
+`deduplication_key`. Failed deliveries use exponential backoff (capped at one
+hour), and expired leases are automatically reclaimed.
 
 Run the tests:
 
@@ -115,7 +125,8 @@ docker compose up --build
 ```
 
 Ethereum metrics are exposed at `localhost:9091`, Base metrics at
-`localhost:9092`, and the Prometheus UI at `localhost:9090`. Both indexers share
+`localhost:9092`, the Prometheus UI at `localhost:9090`, and the Jaeger UI at
+`http://localhost:16686`. Both indexers share
 PostgreSQL safely because persisted records, checkpoints, and worker locks are
 scoped by chain ID. Every application metric also carries a `chain_id` label.
 
@@ -125,6 +136,12 @@ only occurs while caught up or after exhausted retries; catch-up cycles continue
 without an added poll delay. `RPC_RATE_LIMIT` separately caps all JSON-RPC calls
 per second. Polls consume that budget, but most usage comes from block and
 transaction-receipt requests.
+
+For the OpenTelemetry trace-link, open Jaeger, select `vertex-indexer`,
+and find an `outbox.publish` span. Its **Links** section points to the earlier
+`indexer.run_once` trace that transactionally created the message. A link is
+used instead of a parent/child edge because indexing and delivery are separate
+asynchronous operations.
 
 ## Deploy to AWS
 
@@ -136,9 +153,9 @@ deployment commands.
 
 RDS credentials are managed by RDS and injected into ECS without placing the
 password in Terraform configuration. RPC URLs must be created as Secrets
-Manager secrets before deployment. The MSK cluster is reserved for the future
-outbox publisher; this indexer currently persists outbox messages but does not
-send them to Kafka.
+Manager secrets before deployment. The built-in publisher writes outbox
+deliveries to structured logs; the optional MSK cluster is reserved for
+replacing that transport with a Kafka publisher.
 
 ## Current layout
 
@@ -149,6 +166,7 @@ internal/ethrpc/   small typed EVM JSON-RPC client
 internal/indexer/  bounded range orchestration and continuous runner
 internal/postgres/ migrations, dead letters, locking, and atomic persistence
 internal/observability/ health endpoints, Prometheus metrics, and OTLP traces
+internal/outbox/        leased at-least-once relay and publisher
 observability/       Prometheus alert rules
 deploy/terraform/    multi-chain AWS ECS, RDS, MSK, ECR, and monitoring stack
 ```

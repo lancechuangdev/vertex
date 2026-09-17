@@ -9,10 +9,13 @@ import (
 	"io/fs"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/example/vertex/internal/indexer"
+	"github.com/example/vertex/internal/outbox"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 //go:embed migrations/*.sql
@@ -37,6 +40,66 @@ func (s *Store) Backlogs(ctx context.Context, chainID uint64) (uint64, uint64, e
 		return 0, 0, fmt.Errorf("read operational backlogs: %w", err)
 	}
 	return outbox, deadLetters, nil
+}
+
+// ClaimOutbox leases a batch so multiple relay processes can safely compete.
+// A crashed worker's messages become claimable again when locked_until expires.
+func (s *Store) ClaimOutbox(ctx context.Context, chainID uint64, workerID string, limit int, lease time.Duration) ([]outbox.Message, error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH candidates AS (
+			SELECT id FROM outbox_messages
+			WHERE chain_id = $1 AND published_at IS NULL AND invalidated_at IS NULL
+			  AND available_at <= now()
+			  AND (locked_until IS NULL OR locked_until < now())
+			ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $2
+		)
+		UPDATE outbox_messages AS message
+		SET locked_by = $3, locked_until = now() + $4::interval,
+		    attempts = message.attempts + 1, last_error = NULL
+		FROM candidates
+		WHERE message.id = candidates.id
+		RETURNING message.id, message.chain_id, message.event_type,
+		          message.deduplication_key, message.payload,
+		          COALESCE(message.traceparent, ''), COALESCE(message.tracestate, ''),
+		          message.attempts
+	`, chainID, limit, workerID, lease.String())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	messages := make([]outbox.Message, 0, limit)
+	for rows.Next() {
+		var message outbox.Message
+		if err := rows.Scan(&message.ID, &message.ChainID, &message.EventType, &message.DeduplicationKey, &message.Payload, &message.Traceparent, &message.Tracestate, &message.Attempts); err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
+}
+
+func (s *Store) MarkOutboxPublished(ctx context.Context, id int64, workerID string) error {
+	command, err := s.pool.Exec(ctx, `
+		UPDATE outbox_messages
+		SET published_at = now(), locked_by = NULL, locked_until = NULL, last_error = NULL
+		WHERE id = $1 AND locked_by = $2 AND published_at IS NULL
+	`, id, workerID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return fmt.Errorf("outbox message %d lease was lost", id)
+	}
+	return nil
+}
+
+func (s *Store) ReleaseOutbox(ctx context.Context, id int64, workerID, lastError string, retryAt time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE outbox_messages
+		SET available_at = $3, locked_by = NULL, locked_until = NULL, last_error = left($4, 2000)
+		WHERE id = $1 AND locked_by = $2 AND published_at IS NULL
+	`, id, workerID, retryAt, lastError)
+	return err
 }
 
 // AcquireChainLock holds a PostgreSQL session advisory lock until release is
@@ -153,9 +216,10 @@ func (s *Store) Rewind(ctx context.Context, chainID, expectedCheckpoint, replayF
 		return fmt.Errorf("checkpoint changed while rewinding")
 	}
 	if compensate {
+		traceparent, tracestate := traceHeaders(ctx)
 		if _, err := tx.Exec(ctx, `
 		INSERT INTO outbox_messages
-			(chain_id, event_type, deduplication_key, payload)
+			(chain_id, event_type, deduplication_key, payload, traceparent, tracestate)
 		SELECT message.chain_id,
 		       'token_transfer.reverted',
 		       'revert:' || message.deduplication_key,
@@ -164,7 +228,7 @@ func (s *Store) Rewind(ctx context.Context, chainID, expectedCheckpoint, replayF
 		           'original_event_key', message.deduplication_key,
 		           'orphaned_block_hash', block.hash,
 		           'reason', 'chain_reorganization'
-		       )
+		       ), NULLIF($3, ''), NULLIF($4, '')
 		FROM outbox_messages AS message
 		JOIN blocks AS block
 		  ON block.chain_id = message.chain_id
@@ -175,7 +239,7 @@ func (s *Store) Rewind(ctx context.Context, chainID, expectedCheckpoint, replayF
 		  AND message.invalidated_at IS NULL
 		  AND block.number >= $2
 		ON CONFLICT (chain_id, event_type, deduplication_key) DO NOTHING
-		`, chainID, replayFrom); err != nil {
+		`, chainID, replayFrom, traceparent, tracestate); err != nil {
 			return fmt.Errorf("enqueue orphan reversal messages: %w", err)
 		}
 	}
@@ -333,6 +397,7 @@ func (s *Store) PromoteConfirmed(ctx context.Context, chainID, confirmedThrough 
 	defer tx.Rollback(ctx)
 
 	var promoted uint64
+	traceparent, tracestate := traceHeaders(ctx)
 	err = tx.QueryRow(ctx, `
 		WITH newly_confirmed_blocks AS (
 			UPDATE blocks
@@ -354,7 +419,7 @@ func (s *Store) PromoteConfirmed(ctx context.Context, chainID, confirmedThrough 
 			          receipt.block_number, block.hash AS block_hash
 		), inserted_messages AS (
 			INSERT INTO outbox_messages
-				(chain_id, event_type, deduplication_key, payload)
+				(chain_id, event_type, deduplication_key, payload, traceparent, tracestate)
 			SELECT $1, 'token_transfer.confirmed',
 			       tx_hash || ':' || log_index::text || ':' || block_hash,
 			       jsonb_build_object(
@@ -368,7 +433,7 @@ func (s *Store) PromoteConfirmed(ctx context.Context, chainID, confirmedThrough 
 			           'from_address', from_address,
 			           'to_address', to_address,
 			           'value', value::text
-			       )
+			       ), NULLIF($3, ''), NULLIF($4, '')
 			FROM newly_confirmed_transfers
 			ON CONFLICT (chain_id, event_type, deduplication_key) DO UPDATE
 			SET invalidated_at = NULL,
@@ -376,7 +441,7 @@ func (s *Store) PromoteConfirmed(ctx context.Context, chainID, confirmedThrough 
 			RETURNING id
 		)
 		SELECT count(*) FROM newly_confirmed_blocks
-	`, chainID, confirmedThrough).Scan(&promoted)
+	`, chainID, confirmedThrough, traceparent, tracestate).Scan(&promoted)
 	if err != nil {
 		return 0, fmt.Errorf("promote confirmed data: %w", err)
 	}
@@ -384,4 +449,10 @@ func (s *Store) PromoteConfirmed(ctx context.Context, chainID, confirmedThrough 
 		return 0, fmt.Errorf("commit confirmed data: %w", err)
 	}
 	return promoted, nil
+}
+
+func traceHeaders(ctx context.Context) (string, string) {
+	carrier := propagation.MapCarrier{}
+	propagation.TraceContext{}.Inject(ctx, carrier)
+	return carrier.Get("traceparent"), carrier.Get("tracestate")
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/example/vertex/internal/ethrpc"
 	"github.com/example/vertex/internal/indexer"
 	"github.com/example/vertex/internal/observability"
+	"github.com/example/vertex/internal/outbox"
 	"github.com/example/vertex/internal/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
@@ -145,6 +147,14 @@ func run(ctx context.Context, args []string) error {
 			slog.Info("indexing cycle completed", "chain_id", chainID, "blocks", blocks, "outbox_backlog", outbox, "dead_letter_backlog", deadLetters, "error", runErr)
 		},
 	}
+	workerID := fmt.Sprintf("%x", randomWorkerID())
+	relay := outbox.Relay{
+		Store: store, Publisher: outbox.LogPublisher{}, Tracer: tracer,
+		ChainID: chainID, WorkerID: workerID, BatchSize: cfg.OutboxBatchSize,
+		PollInterval: cfg.OutboxPollInterval, Lease: cfg.OutboxLease,
+		RetryInitial: cfg.OutboxRetryInitial,
+		OnError:      func(err error) { slog.Error("outbox relay attempt failed", "chain_id", chainID, "error", err) },
+	}
 	server := &http.Server{
 		Addr:              cfg.ObservabilityAddr,
 		Handler:           observability.Handler(registry, store.Ping),
@@ -160,10 +170,13 @@ func run(ctx context.Context, args []string) error {
 	}()
 	runnerErrors := make(chan error, 1)
 	go func() { runnerErrors <- runner.Run(ctx) }()
+	relayErrors := make(chan error, 1)
+	go func() { relayErrors <- relay.Run(ctx) }()
 
 	slog.Info("indexer running", "chain_id", chainID)
 	var runErr error
 	runnerFinished := false
+	relayFinished := false
 	select {
 	case err := <-serverErrors:
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -173,6 +186,10 @@ func run(ctx context.Context, args []string) error {
 	case err := <-runnerErrors:
 		runErr = err
 		runnerFinished = true
+		cancel()
+	case err := <-relayErrors:
+		runErr = err
+		relayFinished = true
 		cancel()
 	case <-ctx.Done():
 	}
@@ -193,5 +210,27 @@ func run(ctx context.Context, args []string) error {
 			}
 		}
 	}
+	if !relayFinished {
+		select {
+		case err := <-relayErrors:
+			if err != nil && runErr == nil {
+				runErr = err
+			}
+		case <-shutdownCtx.Done():
+			if runErr == nil {
+				runErr = fmt.Errorf("outbox relay did not stop before shutdown deadline")
+			}
+		}
+	}
 	return runErr
+}
+
+func randomWorkerID() []byte {
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		// crypto/rand failures are exceptionally rare; uniqueness is still
+		// adequate within one process when the PID and current time are used.
+		return []byte(fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()))
+	}
+	return id
 }

@@ -6,6 +6,9 @@ x-indexer-environment: &indexer-environment
   RPC_CONCURRENCY: ${RPC_CONCURRENCY:-2}
   MAX_RETRIES: ${MAX_RETRIES:-6}
   RETRY_INITIAL_DELAY: ${RETRY_INITIAL_DELAY:-5s}
+  OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
+  OUTBOX_POLL_INTERVAL: ${OUTBOX_POLL_INTERVAL:-1s}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
 
 services:
   postgres:
@@ -51,6 +54,13 @@ services:
     depends_on:
       - indexer-ethereum
       - indexer-base
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
 
   indexer-base:
     build: .

@@ -17,6 +17,10 @@ func TestLoad(t *testing.T) {
 	t.Setenv("MAX_RETRIES", "6")
 	t.Setenv("RETRY_INITIAL_DELAY", "250ms")
 	t.Setenv("OBSERVABILITY_ADDR", "127.0.0.1:9191")
+	t.Setenv("OUTBOX_BATCH_SIZE", "25")
+	t.Setenv("OUTBOX_POLL_INTERVAL", "250ms")
+	t.Setenv("OUTBOX_LEASE", "45s")
+	t.Setenv("OUTBOX_RETRY_INITIAL_DELAY", "2s")
 
 	cfg, err := Load()
 	if err != nil {
@@ -39,6 +43,9 @@ func TestLoad(t *testing.T) {
 	}
 	if cfg.ObservabilityAddr != "127.0.0.1:9191" {
 		t.Fatalf("ObservabilityAddr = %q", cfg.ObservabilityAddr)
+	}
+	if cfg.OutboxBatchSize != 25 || cfg.OutboxPollInterval != 250*time.Millisecond || cfg.OutboxLease != 45*time.Second || cfg.OutboxRetryInitial != 2*time.Second {
+		t.Fatalf("outbox configuration = %+v", cfg)
 	}
 }
 

@@ -20,9 +20,9 @@ transaction volume.
 It creates a two-AZ VPC, private Fargate tasks, NAT egress for JSON-RPC calls,
 ECR, encrypted RDS with automated backups and storage autoscaling, an Amazon
 Managed Service for Prometheus workspace, CloudWatch logs/alarms, and optionally
-an IAM-authenticated MSK Serverless cluster. MSK is reserved for the outbox
-publisher: the current indexer writes the transactional outbox but does not yet
-publish it.
+an IAM-authenticated MSK Serverless cluster. The built-in outbox relay uses a
+structured-log demo publisher; MSK is reserved for replacing that transport
+with a Kafka publisher.
 
 Each chain task also runs a pinned AWS Distro for OpenTelemetry (ADOT)
 Collector sidecar. The indexer exports OTLP/HTTP traces to
